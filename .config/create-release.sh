@@ -60,6 +60,18 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Check if CHANGELOG.md mentions this version
+if [ -f "CHANGELOG.md" ]; then
+    if ! grep -q "\[$VERSION\]" CHANGELOG.md; then
+        echo -e "${RED}Error: CHANGELOG.md does not contain an entry for version $VERSION${NC}"
+        echo -e "Add a section like:"
+        echo -e "  ${YELLOW}## [$VERSION] - $(date +%Y-%m-%d)${NC}"
+        echo -e "before creating the release."
+        exit 1
+    fi
+    echo -e "${GREEN}CHANGELOG.md contains entry for $VERSION${NC}\n"
+fi
+
 # Get current version from bc-security.php
 CURRENT_VERSION=$(grep -m 1 "Version:" bc-security.php | sed 's/.*Version: *//' | tr -d '\r')
 echo -e "${BLUE}Current version: $CURRENT_VERSION${NC}"
