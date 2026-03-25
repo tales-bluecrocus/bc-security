@@ -3,7 +3,7 @@
  * Plugin Name: BC Security
  * Plugin URI:  https://bluecrocus.ca/
  * Description: WordPress security — blocks user enumeration and brute force attacks (wp-login, XML-RPC, JWT) with IP-based lockout.
- * Version:     2.0.0
+ * Version:     2.0.1
  * Author:      Blue Crocus
  * Author URI:  https://bluecrocus.ca/
  * License:     GPL-2.0-or-later
@@ -22,7 +22,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Configuration
  * ========================================================================= */
 
-define( 'BC_SECURITY_VERSION', '2.0.0' );
+define( 'BC_SECURITY_VERSION', '2.0.1' );
 define( 'BC_SECURITY_FILE', __FILE__ );
 define( 'BC_MAX_ATTEMPTS', 5 );      // Failed attempts before lockout.
 define( 'BC_LOCKOUT_SECONDS', 900 ); // Lockout duration: 15 minutes.
