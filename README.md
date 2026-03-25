@@ -43,10 +43,30 @@ Prevents attackers from discovering valid usernames:
 ## Installation
 
 1. Copy the `bc-security` folder to `wp-content/plugins/`
-2. Run `composer install` (or `composer dump-autoload`) inside the plugin folder
+2. Run `composer install` inside the plugin folder
 3. Activate the plugin in the WordPress admin panel
 
 No additional configuration required. The plugin works immediately after activation.
+
+**Updates:** The plugin auto-detects new releases from GitHub. Updates appear in the WordPress dashboard like any other plugin.
+
+## Releasing a New Version
+
+```bash
+# Bump patch version (2.0.0 → 2.0.1) — auto-commits, tags, and pushes
+./.config/bump-version.sh patch
+
+# Bump minor version (2.0.0 → 2.1.0)
+./.config/bump-version.sh minor
+
+# Or specify exact version
+./.config/create-release.sh 3.0.0
+
+# Build ZIP locally (for manual upload, no release)
+./.config/build-zip.sh
+```
+
+Tag push triggers GitHub Actions → builds ZIP → publishes GitHub Release → WordPress auto-detects update within 12 hours.
 
 ## Configuration
 
@@ -72,7 +92,14 @@ bc-security/
 ├── src/
 │   ├── IpResolver.php        # Client IP detection behind proxies
 │   ├── BruteForce.php        # Login lockout system (wp-login, XML-RPC, JWT)
-│   └── UserEnumeration.php   # Block user discovery vectors
+│   ├── UserEnumeration.php   # Block user discovery vectors
+│   └── UpdateChecker.php     # GitHub-based auto-updater
+├── .config/                  # Release scripts
+│   ├── bump-version.sh       # Semantic version incrementor
+│   ├── create-release.sh     # Release orchestrator
+│   └── build-zip.sh          # Local ZIP builder
+├── .github/workflows/
+│   └── release.yml           # CI/CD: tag push → build → GitHub Release
 ├── CLAUDE.md
 └── README.md
 ```
@@ -126,6 +153,8 @@ The plugin uses **WordPress Transients** to store lockout state:
 - Refactored to PSR-4 class-based architecture
 - All code and documentation translated to English
 - Namespace: `BcSecurity\`
+- Added GitHub-based auto-update via Plugin Update Checker
+- Added release scripts and CI/CD pipeline
 
 ### 1.1.0
 - Added brute force protection across 3 vectors (wp-login, XML-RPC, JWT)

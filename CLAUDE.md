@@ -21,7 +21,14 @@ bc-security/
 ├── src/
 │   ├── IpResolver.php        # Client IP detection behind proxies
 │   ├── BruteForce.php        # Login lockout system
-│   └── UserEnumeration.php   # Block user discovery vectors
+│   ├── UserEnumeration.php   # Block user discovery vectors
+│   └── UpdateChecker.php     # GitHub-based auto-updater
+├── .config/                  # Release scripts
+│   ├── bump-version.sh       # Semantic version incrementor
+│   ├── create-release.sh     # Release orchestrator (version bump + tag + push)
+│   └── build-zip.sh          # Local ZIP builder (manual upload)
+├── .github/workflows/
+│   └── release.yml           # CI/CD: v* tag → composer install → ZIP → GitHub Release
 ├── CLAUDE.md                 # This file (development context)
 └── README.md                 # User-facing documentation
 ```
@@ -33,6 +40,7 @@ bc-security/
 | `IpResolver` | Detect real client IP (X-Forwarded-For, X-Real-IP, REMOTE_ADDR) |
 | `BruteForce` | Lockout per IP, failed attempt tracking, 429 response, all login hooks |
 | `UserEnumeration` | Block REST API users endpoint, author archives, ?author=N |
+| `UpdateChecker` | GitHub Releases auto-updater via Plugin Update Checker |
 
 ## How the brute force protection works
 
@@ -99,3 +107,29 @@ hydra -l USER -P passwords.txt TARGET https-post-form \
 - **IP detection checks X-Forwarded-For first** — needed behind reverse proxies (Cloudflare, nginx). The first IP in the chain is used.
 - **Hydra tests must use `S=` (success pattern)** — when lockout triggers, the response no longer contains the normal failure string, causing false positives with `F=` pattern.
 - **IpResolver is injected** into BruteForce via constructor — allows testing with mock IPs and keeps IP logic separate from lockout logic.
+
+## Release flow
+
+```bash
+./.config/bump-version.sh patch   # 2.0.0 → 2.0.1
+./.config/bump-version.sh minor   # 2.0.0 → 2.1.0
+./.config/bump-version.sh major   # 2.0.0 → 3.0.0
+```
+
+Tag push triggers GitHub Actions → `composer install --no-dev` → rsync clean dist → ZIP → GitHub Release → WordPress auto-detects update via `UpdateChecker::register()`.
+
+### Release scripts (.config/)
+
+| Script | Purpose |
+|--------|---------|
+| `bump-version.sh` | Parse current version, increment, delegate to create-release.sh |
+| `create-release.sh` | Update bc-security.php version, commit, tag, push |
+| `build-zip.sh` | Local ZIP build for manual client upload (no GitHub release) |
+
+### Auto-update mechanism
+
+- **Library:** Plugin Update Checker v5.6 (yahnis-elsts)
+- **Source:** GitHub Releases (ZIP asset)
+- **Config:** `UpdateChecker::register()` → points to `https://github.com/tales-bluecrocus/bc-security/`
+- **Detection:** WordPress checks every 12 hours
+- **Folder fix:** `upgrader_source_selection` filter ensures extracted folder name matches `bc-security`

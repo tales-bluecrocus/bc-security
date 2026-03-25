@@ -1,0 +1,60 @@
+name: Create Release
+
+on:
+    push:
+        tags:
+            - "v*"
+
+permissions:
+    contents: write
+
+jobs:
+    release:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup PHP
+              uses: shivammathur/setup-php@v2
+              with:
+                  php-version: "8.3"
+                  tools: composer
+
+            - name: Install Composer dependencies (production only)
+              run: composer install --no-dev --optimize-autoloader
+
+            - name: Create distribution directory
+              run: mkdir -p dist-release
+
+            - name: Copy plugin files to distribution
+              run: |
+                  rsync -av --progress . dist-release/bc-security \
+                    --exclude='.git/' \
+                    --exclude='.github/' \
+                    --exclude='.vscode/' \
+                    --exclude='.config/' \
+                    --exclude='.claude/' \
+                    --exclude='dist-release' \
+                    --exclude='.gitignore' \
+                    --exclude='.gitattributes' \
+                    --exclude='composer.json' \
+                    --exclude='composer.lock' \
+                    --exclude='docs/' \
+                    --exclude='CLAUDE.md' \
+                    --exclude='README.md' \
+                    --exclude='*.log'
+
+            - name: Create ZIP file
+              run: |
+                  cd dist-release
+                  zip -r ../bc-security.zip bc-security
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  files: bc-security.zip
+                  generate_release_notes: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -22,6 +22,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Configuration
  * ========================================================================= */
 
+define( 'BC_SECURITY_VERSION', '2.0.0' );
+define( 'BC_SECURITY_FILE', __FILE__ );
 define( 'BC_MAX_ATTEMPTS', 5 );      // Failed attempts before lockout.
 define( 'BC_LOCKOUT_SECONDS', 900 ); // Lockout duration: 15 minutes.
 
@@ -33,3 +35,4 @@ require __DIR__ . '/vendor/autoload.php';
 
 ( new BcSecurity\BruteForce( new BcSecurity\IpResolver() ) )->register();
 ( new BcSecurity\UserEnumeration() )->register();
+( new BcSecurity\UpdateChecker() )->register();
