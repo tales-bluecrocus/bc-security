@@ -1,0 +1,14 @@
+{
+    "name": "bluecrocus/bc-security",
+    "description": "WordPress security plugin — brute force protection and user enumeration blocking.",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "autoload": {
+        "psr-4": {
+            "BcSecurity\\": "src/"
+        }
+    },
+    "require": {
+        "php": ">=7.4"
+    }
+}
