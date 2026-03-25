@@ -5,6 +5,12 @@ All notable changes to BC Security will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.1] - 2026-03-25
+
+### Added
+- CHANGELOG.md with full release history
+- Changelog validation check in release script
+
 ## [2.0.0] - 2026-03-25
 
 ### Added
