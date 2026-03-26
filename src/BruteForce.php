@@ -170,6 +170,15 @@ class BruteForce {
 			);
 		}
 
+		// Block non-existent usernames immediately — kills distributed brute force.
+		if ( ! username_exists( $username ) && ! email_exists( $username ) ) {
+			$this->record_failed_attempt( $ip );
+			return new \WP_Error(
+				'authentication_failed',
+				'<strong>Error:</strong> The username or password you entered is incorrect.'
+			);
+		}
+
 		// CAPTCHA check on login (if enabled).
 		if ( $this->captcha && $this->captcha->is_login_enabled() ) {
 			$result = $this->captcha->verify();
