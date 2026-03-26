@@ -166,6 +166,10 @@ class AdminPage {
 	 * @return array Sanitized settings.
 	 */
 	public function sanitize_settings( $input ): array {
+		if ( ! is_array( $input ) ) {
+			$input = array();
+		}
+
 		$sanitized = array();
 
 		$sanitized['honeypot_enabled'] = ! empty( $input['honeypot_enabled'] );
