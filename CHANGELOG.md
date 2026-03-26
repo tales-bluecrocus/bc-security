@@ -5,6 +5,11 @@ All notable changes to BlueCrocus Security will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.1.1] - 2026-03-25
+
+### Changed
+- Expanded default blocked keywords from 13 to 140+ patterns across 7 categories: SEO & Digital Marketing, Crypto & Bitcoin, Sales & Cold Outreach, Cheap Dev & Design, Financial Scams, Common Spam Patterns, and General
+
 ## [2.1.0] - 2026-03-25
 
 ### Added
