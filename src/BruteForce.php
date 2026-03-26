@@ -18,10 +18,17 @@ class BruteForce {
 	private $ip_resolver;
 
 	/**
-	 * @param IpResolver $ip_resolver IP detection dependency.
+	 * @var CaptchaProvider|null
 	 */
-	public function __construct( IpResolver $ip_resolver ) {
+	private $captcha;
+
+	/**
+	 * @param IpResolver           $ip_resolver IP detection dependency.
+	 * @param CaptchaProvider|null $captcha     Optional CAPTCHA provider.
+	 */
+	public function __construct( IpResolver $ip_resolver, ?CaptchaProvider $captcha = null ) {
 		$this->ip_resolver = $ip_resolver;
+		$this->captcha     = $captcha;
 	}
 
 	/**
@@ -161,6 +168,17 @@ class BruteForce {
 				'too_many_requests',
 				'Too many failed login attempts. Try again in ' . ceil( $remaining / 60 ) . ' minute(s).'
 			);
+		}
+
+		// CAPTCHA check on login (if enabled).
+		if ( $this->captcha && $this->captcha->is_login_enabled() ) {
+			$result = $this->captcha->verify();
+			if ( ! $result['success'] ) {
+				return new \WP_Error(
+					'captcha_failed',
+					'Authentication failed. Please try again.'
+				);
+			}
 		}
 
 		return $user;
