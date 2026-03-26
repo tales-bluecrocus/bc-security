@@ -22,7 +22,12 @@ bc-security/
 │   ├── IpResolver.php        # Client IP detection behind proxies
 │   ├── BruteForce.php        # Login lockout system
 │   ├── UserEnumeration.php   # Block user discovery vectors
-│   └── UpdateChecker.php     # GitHub-based auto-updater
+│   ├── UpdateChecker.php     # GitHub-based auto-updater
+│   ├── Database.php          # Table migration (bc_form_logs)
+│   ├── FormLogger.php        # Form submission logger
+│   ├── SpamFilter.php        # Honeypot + keyword spam filter
+│   ├── AdminPage.php         # Settings + Logs admin page
+│   └── LogsTable.php         # WP_List_Table for log display
 ├── .config/                  # Release scripts
 │   ├── bump-version.sh       # Semantic version incrementor
 │   ├── create-release.sh     # Release orchestrator (version bump + tag + push)
@@ -41,6 +46,11 @@ bc-security/
 | `BruteForce` | Lockout per IP, failed attempt tracking, 429 response, all login hooks |
 | `UserEnumeration` | Block REST API users endpoint, author archives, ?author=N |
 | `UpdateChecker` | GitHub Releases auto-updater via Plugin Update Checker |
+| `Database` | Creates/updates `wp_bc_form_logs` table via dbDelta |
+| `FormLogger` | Insert/query/clear form submission logs |
+| `SpamFilter` | Honeypot injection + keyword filter for Elementor/CF7/Gravity/Formidable |
+| `AdminPage` | Settings + Logs admin page with tabs |
+| `LogsTable` | WP_List_Table subclass for log display with pagination and filters |
 
 ## How the brute force protection works
 
@@ -99,6 +109,39 @@ hydra -l USER -P passwords.txt TARGET https-post-form \
 hydra -l USER -P passwords.txt TARGET https-post-form \
   "/wp-json/jwt-auth/v1/token:username=^USER^&password=^PASS^:S=token" -t 4
 ```
+
+## Spam protection
+
+### How it works
+
+1. `SpamFilter::inject_honeypot_js()` adds a hidden field to all forms via JavaScript (avoids caching issues)
+2. On form submit, validation hooks check: honeypot filled? → blocked. Keyword match? → blocked. Otherwise → sent.
+3. All submissions (sent + blocked) are logged to `wp_bc_form_logs` via `FormLogger::log()`
+
+### Form plugin hooks
+
+| Plugin | Validation Hook | Success Hook |
+|--------|----------------|--------------|
+| Elementor Pro | `elementor_pro/forms/validation` | `elementor_pro/forms/new_record` |
+| Contact Form 7 | `wpcf7_spam` | `wpcf7_mail_sent` |
+| Gravity Forms | `gform_validation` | `gform_after_submission` |
+| Formidable | `frm_validate_entry` | `frm_after_create_entry` |
+
+### Settings
+
+Stored in `wp_options` key `bc_security_settings`:
+- `honeypot_enabled` (bool, default true)
+- `blocked_keywords` (array, default: seo, marketing, bitcoin, crypto, casino, viagra, forex, backlinks, link building, guest post, cbd, diet pills, weight loss)
+
+### Admin page
+
+Menu: "BC Security" (dashicons-shield-alt), capability: `manage_options`
+- **Settings tab**: honeypot toggle + keywords textarea
+- **Logs tab**: WP_List_Table with status filter, search, pagination (25/page), Clear Logs button
+
+### Database
+
+Table `wp_bc_form_logs` created via `dbDelta()`. Migration tracked by `bc_security_db_version` option. Runs on activation and on `plugins_loaded` with version check.
 
 ## Key decisions
 

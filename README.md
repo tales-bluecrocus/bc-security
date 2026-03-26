@@ -1,6 +1,6 @@
 # BC Security
 
-WordPress security plugin that protects against user enumeration and brute force attacks.
+WordPress security plugin that protects against user enumeration, brute force attacks, and form spam.
 
 ## Features
 
@@ -33,6 +33,26 @@ Prevents attackers from discovering valid usernames:
 | REST API `/wp/v2/users` | Endpoint removed for unauthenticated visitors |
 | Author archives `/author/name/` | 301 redirect to homepage |
 | Query parameter `?author=1` | 301 redirect to homepage |
+
+### Form Spam Protection
+
+Blocks spam submissions on contact forms with two layers of defense:
+
+- **Honeypot field** — invisible field injected via JavaScript; bots fill it, humans don't
+- **Keyword filter** — blocks submissions containing configurable spam keywords (SEO, bitcoin, casino, etc.)
+
+**Supported form plugins:**
+
+| Plugin | Status |
+|--------|--------|
+| Elementor Pro Forms | Primary — tested across 50+ client sites |
+| Contact Form 7 | Supported |
+| Gravity Forms | Supported |
+| Formidable Forms | Supported |
+
+**Admin page** (Settings > BC Security):
+- **Settings tab** — toggle honeypot on/off, manage blocked keywords list
+- **Logs tab** — view all form submissions with status (sent/blocked), filter by status, search by IP
 
 ## Requirements
 
@@ -93,7 +113,12 @@ bc-security/
 │   ├── IpResolver.php        # Client IP detection behind proxies
 │   ├── BruteForce.php        # Login lockout system (wp-login, XML-RPC, JWT)
 │   ├── UserEnumeration.php   # Block user discovery vectors
-│   └── UpdateChecker.php     # GitHub-based auto-updater
+│   ├── UpdateChecker.php     # GitHub-based auto-updater
+│   ├── Database.php          # Table migration (bc_form_logs)
+│   ├── FormLogger.php        # Form submission logger
+│   ├── SpamFilter.php        # Honeypot + keyword spam filter
+│   ├── AdminPage.php         # Settings + Logs admin page
+│   └── LogsTable.php         # WP_List_Table for log display
 ├── .config/                  # Release scripts
 │   ├── bump-version.sh       # Semantic version incrementor
 │   ├── create-release.sh     # Release orchestrator
