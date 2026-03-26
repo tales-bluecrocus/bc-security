@@ -23,6 +23,11 @@ class SpamFilter {
 	private $logger;
 
 	/**
+	 * @var CaptchaProvider
+	 */
+	private $captcha;
+
+	/**
 	 * Default blocked keywords used when settings have not been saved yet.
 	 *
 	 * @var array
@@ -184,12 +189,14 @@ class SpamFilter {
 	);
 
 	/**
-	 * @param IpResolver $ip_resolver IP detection dependency.
-	 * @param FormLogger $logger      Form submission logger.
+	 * @param IpResolver      $ip_resolver IP detection dependency.
+	 * @param FormLogger      $logger      Form submission logger.
+	 * @param CaptchaProvider $captcha     CAPTCHA verification provider.
 	 */
-	public function __construct( IpResolver $ip_resolver, FormLogger $logger ) {
+	public function __construct( IpResolver $ip_resolver, FormLogger $logger, CaptchaProvider $captcha ) {
 		$this->ip_resolver = $ip_resolver;
 		$this->logger      = $logger;
+		$this->captcha     = $captcha;
 	}
 
 	/**
@@ -279,6 +286,31 @@ class SpamFilter {
 					return $keyword;
 				}
 			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Verify CAPTCHA token and log if blocked.
+	 *
+	 * @param string $form_plugin Form plugin identifier.
+	 * @param array  $fields      Form field data for logging.
+	 * @return string|null Block reason if CAPTCHA failed, null if passed.
+	 */
+	private function check_captcha( string $form_plugin, array $fields ): ?string {
+		$result = $this->captcha->verify();
+
+		if ( ! $result['success'] ) {
+			$this->logger->log( array(
+				'ip'           => $this->ip_resolver->get_client_ip(),
+				'status'       => 'blocked',
+				'block_reason' => $result['reason'] ?? 'captcha_failed',
+				'form_plugin'  => $form_plugin,
+				'page_url'     => $this->get_page_url(),
+				'form_data'    => $fields,
+			) );
+			return $result['reason'] ?? 'captcha_failed';
 		}
 
 		return null;
@@ -392,6 +424,14 @@ class SpamFilter {
 			}
 		}
 
+		// CAPTCHA check.
+		$captcha_reason = $this->check_captcha( 'elementor', $fields );
+		if ( $captcha_reason !== null ) {
+			$handler->add_error_message( 'Your submission could not be processed.' );
+			$handler->add_error( 'bc_spam', 'Your submission could not be processed.' );
+			return;
+		}
+
 		// Honeypot check.
 		if ( $this->is_honeypot_triggered() ) {
 			$this->logger->log( array(
@@ -468,6 +508,12 @@ class SpamFilter {
 
 		$fields = $this->get_post_text_fields();
 
+		// CAPTCHA check.
+		$captcha_reason = $this->check_captcha( 'cf7', $fields );
+		if ( $captcha_reason !== null ) {
+			return true;
+		}
+
 		// Honeypot check.
 		if ( $this->is_honeypot_triggered() ) {
 			$this->logger->log( array(
@@ -530,6 +576,18 @@ class SpamFilter {
 		}
 
 		$fields = $this->get_post_text_fields();
+
+		// CAPTCHA check.
+		$captcha_reason = $this->check_captcha( 'gravity', $fields );
+		if ( $captcha_reason !== null ) {
+			$validation_result['is_valid'] = false;
+			foreach ( $validation_result['form']['fields'] as &$field ) {
+				$field->failed_validation  = true;
+				$field->validation_message = 'Your submission could not be processed.';
+				break;
+			}
+			return $validation_result;
+		}
 
 		// Honeypot check.
 		if ( $this->is_honeypot_triggered() ) {
@@ -611,6 +669,13 @@ class SpamFilter {
 	 */
 	public function validate_formidable( $errors, $values ): array {
 		$fields = $this->get_post_text_fields();
+
+		// CAPTCHA check.
+		$captcha_reason = $this->check_captcha( 'formidable', $fields );
+		if ( $captcha_reason !== null ) {
+			$errors['bc_spam'] = 'Your submission could not be processed.';
+			return $errors;
+		}
 
 		// Honeypot check.
 		if ( $this->is_honeypot_triggered() ) {
