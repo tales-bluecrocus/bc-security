@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fail-open behavior: forms still work if CAPTCHA API is unavailable
 - Immediate blocking of login attempts with non-existent usernames (counters distributed brute force attacks that rotate IPs)
 
+### Fixed
+- Critical error when saving CAPTCHA settings in admin page
+
 ## [2.1.1] - 2026-03-25
 
 ### Changed
