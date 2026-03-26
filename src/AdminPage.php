@@ -175,7 +175,7 @@ class AdminPage {
 		$sanitized['honeypot_enabled'] = ! empty( $input['honeypot_enabled'] );
 
 		$keywords_raw = isset( $input['blocked_keywords'] ) ? $input['blocked_keywords'] : '';
-		$keywords     = array_map( 'trim', explode( "\n", $keywords_raw ) );
+		$keywords     = is_array( $keywords_raw ) ? $keywords_raw : array_map( 'trim', explode( "\n", $keywords_raw ) );
 		$keywords     = array_filter( $keywords, function ( $keyword ) {
 			return $keyword !== '';
 		} );
