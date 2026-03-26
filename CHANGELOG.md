@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - CAPTCHA verification as first layer before honeypot and keyword checks
 - Login page CAPTCHA protection (optional, disabled by default)
 - Fail-open behavior: forms still work if CAPTCHA API is unavailable
+- Immediate blocking of login attempts with non-existent usernames (counters distributed brute force attacks that rotate IPs)
 
 ## [2.1.1] - 2026-03-25
 
