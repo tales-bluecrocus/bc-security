@@ -5,6 +5,11 @@ All notable changes to BlueCrocus Security will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] - 2026-03-26
+
+### Fixed
+- Critical error when saving CAPTCHA settings in admin page
+
 ## [2.2.0] - 2026-03-26
 
 ### Added
@@ -14,9 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Login page CAPTCHA protection (optional, disabled by default)
 - Fail-open behavior: forms still work if CAPTCHA API is unavailable
 - Immediate blocking of login attempts with non-existent usernames (counters distributed brute force attacks that rotate IPs)
-
-### Fixed
-- Critical error when saving CAPTCHA settings in admin page
 
 ## [2.1.1] - 2026-03-25
 
