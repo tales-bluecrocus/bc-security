@@ -5,10 +5,11 @@ All notable changes to BlueCrocus Security will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.2.1] - 2026-03-26
+## [2.2.2] - 2026-03-26
 
 ### Fixed
-- Critical error when saving CAPTCHA settings in admin page
+- Critical error when saving CAPTCHA settings (explode on array input)
+- Guard sanitize_settings against null input
 
 ## [2.2.0] - 2026-03-26
 
