@@ -37,13 +37,16 @@ require __DIR__ . '/vendor/autoload.php';
 ( new BcSecurity\Database() )->maybe_create_tables();
 
 // Security features.
-( new BcSecurity\BruteForce( new BcSecurity\IpResolver() ) )->register();
+$bc_captcha = new BcSecurity\CaptchaProvider();
+$bc_captcha->register();
+
+( new BcSecurity\BruteForce( new BcSecurity\IpResolver(), $bc_captcha ) )->register();
 ( new BcSecurity\UserEnumeration() )->register();
 ( new BcSecurity\UpdateChecker() )->register();
 
 // Spam protection.
 $bc_logger = new BcSecurity\FormLogger();
-( new BcSecurity\SpamFilter( new BcSecurity\IpResolver(), $bc_logger ) )->register();
+( new BcSecurity\SpamFilter( new BcSecurity\IpResolver(), $bc_logger, $bc_captcha ) )->register();
 
 // Admin UI.
 if ( is_admin() ) {

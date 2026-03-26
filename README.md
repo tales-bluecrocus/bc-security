@@ -54,6 +54,25 @@ Blocks spam submissions on contact forms with two layers of defense:
 - **Settings tab** — toggle honeypot on/off, manage blocked keywords list
 - **Logs tab** — view all form submissions with status (sent/blocked), filter by status, search by IP
 
+### CAPTCHA Protection (Optional)
+
+Add an extra layer of bot protection with reCAPTCHA v3 or Cloudflare Turnstile.
+
+**Setup:**
+1. Go to **BlueCrocus Security** → **Settings**
+2. Under "CAPTCHA Protection", select your provider:
+   - **reCAPTCHA v3**: Get keys at [Google reCAPTCHA](https://www.google.com/recaptcha/admin)
+   - **Cloudflare Turnstile**: Get keys at [Cloudflare Dashboard](https://dash.cloudflare.com/turnstile)
+3. Enter your Site Key and Secret Key
+4. For reCAPTCHA v3, adjust the Score Threshold (default 0.5)
+5. Optionally enable "Protect Login Page"
+
+**How it works:**
+- Runs invisibly — no user interaction required
+- Checks every form submission before honeypot and keyword filters
+- Fail-open: if the CAPTCHA API is down, forms still work (honeypot + keywords still protect)
+- All blocked submissions are logged with the reason (e.g., `captcha_score:0.3`)
+
 ## Requirements
 
 - WordPress 5.0+

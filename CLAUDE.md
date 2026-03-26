@@ -46,6 +46,7 @@ bc-security/
 | `BruteForce` | Lockout per IP, failed attempt tracking, 429 response, all login hooks |
 | `UserEnumeration` | Block REST API users endpoint, author archives, ?author=N |
 | `UpdateChecker` | GitHub Releases auto-updater via Plugin Update Checker |
+| `CaptchaProvider` | reCAPTCHA v3 / Turnstile CAPTCHA: JS injection, token verification, fail-open |
 | `Database` | Creates/updates `wp_bc_form_logs` table via dbDelta |
 | `FormLogger` | Insert/query/clear form submission logs |
 | `SpamFilter` | Honeypot injection + keyword filter for Elementor/CF7/Gravity/Formidable |
@@ -132,6 +133,19 @@ hydra -l USER -P passwords.txt TARGET https-post-form \
 Stored in `wp_options` key `bc_security_settings`:
 - `honeypot_enabled` (bool, default true)
 - `blocked_keywords` (array, default: seo, marketing, bitcoin, crypto, casino, viagra, forex, backlinks, link building, guest post, cbd, diet pills, weight loss)
+
+### CAPTCHA protection
+
+Optional layer (disabled by default). Supports reCAPTCHA v3 and Cloudflare Turnstile.
+
+Settings stored in `bc_security_settings`:
+- `captcha_provider` (string, default 'off'): 'off' | 'recaptcha_v3' | 'turnstile'
+- `captcha_site_key` (string)
+- `captcha_secret_key` (string)
+- `captcha_score_threshold` (float, default 0.5, reCAPTCHA v3 only)
+- `captcha_on_login` (bool, default false)
+
+When enabled, CAPTCHA runs as the first check before honeypot and keywords. Fail-open on API errors (other layers still protect). CAPTCHA failure on login does NOT count as a brute force attempt.
 
 ### Admin page
 
