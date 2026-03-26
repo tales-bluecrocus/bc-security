@@ -2,7 +2,7 @@
 /**
  * Plugin Name: BC Security
  * Plugin URI:  https://bluecrocus.ca/
- * Description: WordPress security — blocks user enumeration and brute force attacks (wp-login, XML-RPC, JWT) with IP-based lockout.
+ * Description: WordPress security — brute force protection, user enumeration blocking, and form spam filtering with honeypot and keyword detection.
  * Version:     2.0.1
  * Author:      Blue Crocus
  * Author URI:  https://bluecrocus.ca/
@@ -33,6 +33,24 @@ define( 'BC_LOCKOUT_SECONDS', 900 ); // Lockout duration: 15 minutes.
 
 require __DIR__ . '/vendor/autoload.php';
 
+// Database migration (lightweight version check).
+( new BcSecurity\Database() )->maybe_create_tables();
+
+// Security features.
 ( new BcSecurity\BruteForce( new BcSecurity\IpResolver() ) )->register();
 ( new BcSecurity\UserEnumeration() )->register();
 ( new BcSecurity\UpdateChecker() )->register();
+
+// Spam protection.
+$bc_logger = new BcSecurity\FormLogger();
+( new BcSecurity\SpamFilter( new BcSecurity\IpResolver(), $bc_logger ) )->register();
+
+// Admin UI.
+if ( is_admin() ) {
+	( new BcSecurity\AdminPage( $bc_logger ) )->register();
+}
+
+// Run migration on plugin activation.
+register_activation_hook( __FILE__, function () {
+	( new BcSecurity\Database() )->maybe_create_tables();
+} );
