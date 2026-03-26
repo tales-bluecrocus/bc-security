@@ -5,6 +5,15 @@ All notable changes to BlueCrocus Security will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] - 2026-03-26
+
+### Added
+- Optional CAPTCHA protection with reCAPTCHA v3 and Cloudflare Turnstile support
+- CAPTCHA settings section in admin page (provider, site key, secret key, score threshold, login toggle)
+- CAPTCHA verification as first layer before honeypot and keyword checks
+- Login page CAPTCHA protection (optional, disabled by default)
+- Fail-open behavior: forms still work if CAPTCHA API is unavailable
+
 ## [2.1.1] - 2026-03-25
 
 ### Changed
