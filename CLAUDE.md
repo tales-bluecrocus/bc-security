@@ -1,4 +1,4 @@
-# BC Security — CLAUDE.md
+# BlueCrocus Security — CLAUDE.md
 
 ## What is this plugin?
 
@@ -135,7 +135,7 @@ Stored in `wp_options` key `bc_security_settings`:
 
 ### Admin page
 
-Menu: "BC Security" (dashicons-shield-alt), capability: `manage_options`
+Menu: "BlueCrocus Security" (dashicons-shield-alt), capability: `manage_options`
 - **Settings tab**: honeypot toggle + keywords textarea
 - **Logs tab**: WP_List_Table with status filter, search, pagination (25/page), Clear Logs button
 

@@ -2,7 +2,7 @@
 /**
  * Admin page — settings and form submission logs.
  *
- * Provides a "BC Security" menu page with two tabs:
+ * Provides a "BlueCrocus Security" menu page with two tabs:
  * - Settings: honeypot toggle and blocked keywords textarea.
  * - Logs: WP_List_Table-based log viewer with filtering and pagination.
  *
@@ -56,12 +56,12 @@ class AdminPage {
 	}
 
 	/**
-	 * Add the "BC Security" top-level admin menu page.
+	 * Add the "BlueCrocus Security" top-level admin menu page.
 	 */
 	public function add_menu_page(): void {
 		add_menu_page(
-			'BC Security',
-			'BC Security',
+			'BlueCrocus Security',
+			'BlueCrocus Security',
 			'manage_options',
 			'bc-security',
 			array( $this, 'render_page' ),
@@ -211,7 +211,7 @@ class AdminPage {
 		$current_tab = isset( $_GET['tab'] ) ? sanitize_text_field( wp_unslash( $_GET['tab'] ) ) : 'settings';
 		?>
 		<div class="wrap">
-			<h1>BC Security</h1>
+			<h1>BlueCrocus Security</h1>
 
 			<nav class="nav-tab-wrapper">
 				<a href="<?php echo esc_url( admin_url( 'admin.php?page=bc-security&tab=settings' ) ); ?>" class="nav-tab <?php echo $current_tab === 'settings' ? 'nav-tab-active' : ''; ?>">

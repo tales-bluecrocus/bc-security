@@ -15,7 +15,7 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}Building BC Security plugin...${NC}\n"
+echo -e "${BLUE}Building BlueCrocus Security plugin...${NC}\n"
 
 # Clean old artifacts
 echo -e "${GREEN}Cleaning old build...${NC}"

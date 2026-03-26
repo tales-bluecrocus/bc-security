@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: BC Security
+ * Plugin Name: BlueCrocus Security
  * Plugin URI:  https://bluecrocus.ca/
  * Description: WordPress security — brute force protection, user enumeration blocking, and form spam filtering with honeypot and keyword detection.
  * Version:     2.0.1

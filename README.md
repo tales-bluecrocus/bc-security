@@ -1,4 +1,4 @@
-# BC Security
+# BlueCrocus Security
 
 WordPress security plugin that protects against user enumeration, brute force attacks, and form spam.
 
@@ -50,7 +50,7 @@ Blocks spam submissions on contact forms with two layers of defense:
 | Gravity Forms | Supported |
 | Formidable Forms | Supported |
 
-**Admin page** (Settings > BC Security):
+**Admin page** (Settings > BlueCrocus Security):
 - **Settings tab** — toggle honeypot on/off, manage blocked keywords list
 - **Logs tab** — view all form submissions with status (sent/blocked), filter by status, search by IP
 

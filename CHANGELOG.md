@@ -1,9 +1,23 @@
 # Changelog
 
-All notable changes to BC Security will be documented in this file.
+All notable changes to BlueCrocus Security will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
+
+## [2.1.0] - 2026-03-25
+
+### Added
+- Form spam protection with honeypot field and keyword filtering
+- Support for Elementor Pro, Contact Form 7, Gravity Forms, and Formidable Forms
+- Admin page (Settings > BlueCrocus Security) with two tabs
+- Settings tab: honeypot toggle and configurable blocked keywords list
+- Logs tab: form submission log with status filter, search, and pagination
+- Custom database table (`wp_bc_form_logs`) for submission logging
+- Default blocked keywords: seo, marketing, bitcoin, crypto, casino, viagra, forex, backlinks, etc.
+
+### Changed
+- Plugin renamed to "BlueCrocus Security"
 
 ## [2.0.1] - 2026-03-25
 
@@ -21,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - GitHub Actions CI/CD pipeline for automated builds
 
 ### Changed
-- Plugin renamed from "PPC Security" to "BC Security"
+- Plugin renamed from "PPC Security" to "BlueCrocus Security"
 - All code and documentation translated to English
 - Constants renamed from `PPC_*` to `BC_*`
 - Transient keys renamed from `ppc_lockout_` to `bc_lockout_`
