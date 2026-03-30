@@ -1,4 +1,4 @@
-# [](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.2...v) (2026-03-30)
+## [2.2.3](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.2...v2.2.3) (2026-03-30)
 
 
 ### Bug Fixes
