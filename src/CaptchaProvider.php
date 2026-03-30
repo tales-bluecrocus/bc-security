@@ -152,7 +152,14 @@ class CaptchaProvider {
 								form.appendChild(input);
 							}
 							input.value = token;
-							form.submit();
+							var btn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+							if (btn) {
+								btn.click();
+							} else if (form.requestSubmit) {
+								form.requestSubmit();
+							} else {
+								form.submit();
+							}
 						});
 					});
 				});
