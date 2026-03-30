@@ -1,3 +1,6 @@
 /vendor/
 /docs
 /.omc
+clients.txt
+detect-forms.sh
+form-plugins-report.csv
