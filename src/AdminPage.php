@@ -157,6 +157,29 @@ class AdminPage {
 			'bc-security',
 			'bc_security_captcha_section'
 		);
+
+		add_settings_section(
+			'bc_security_pwreset_section',
+			'Password Reset Protection',
+			array( $this, 'render_pwreset_section_description' ),
+			'bc-security'
+		);
+
+		add_settings_field(
+			'pwreset_protection',
+			'Rate Limit Reset Requests',
+			array( $this, 'render_pwreset_protection_field' ),
+			'bc-security',
+			'bc_security_pwreset_section'
+		);
+
+		add_settings_field(
+			'pwreset_generic_response',
+			'Hide Account Existence',
+			array( $this, 'render_pwreset_generic_field' ),
+			'bc-security',
+			'bc_security_pwreset_section'
+		);
 	}
 
 	/**
@@ -196,6 +219,9 @@ class AdminPage {
 		$sanitized['captcha_score_threshold'] = max( 0.1, min( 0.9, $threshold ) );
 
 		$sanitized['captcha_on_login'] = ! empty( $input['captcha_on_login'] );
+
+		$sanitized['pwreset_protection']       = ! empty( $input['pwreset_protection'] );
+		$sanitized['pwreset_generic_response'] = ! empty( $input['pwreset_generic_response'] );
 
 		return $sanitized;
 	}
@@ -308,6 +334,56 @@ class AdminPage {
 			Enable CAPTCHA on wp-login.php
 		</label>
 		<?php
+	}
+
+	/**
+	 * Render the password reset section description.
+	 */
+	public function render_pwreset_section_description(): void {
+		echo '<p>Protects the "Lost your password?" form against automated abuse. Bots submitting reset requests are throttled, and each account can only be sent one reset email every 15 minutes.</p>';
+	}
+
+	/**
+	 * Render the reset rate limiting toggle checkbox.
+	 */
+	public function render_pwreset_protection_field(): void {
+		$settings = $this->get_pwreset_settings();
+		$checked  = ! empty( $settings['pwreset_protection'] ) ? 'checked' : '';
+		?>
+		<label>
+			<input type="checkbox" name="bc_security_settings[pwreset_protection]" value="1" <?php echo $checked; ?> />
+			Limit password reset requests
+		</label>
+		<p class="description">Throttles an IP after 3 reset requests, and sends at most one reset email per account every 15 minutes. Blocked attempts appear in the Logs tab.</p>
+		<?php
+	}
+
+	/**
+	 * Render the generic response toggle checkbox.
+	 */
+	public function render_pwreset_generic_field(): void {
+		$settings = $this->get_pwreset_settings();
+		$checked  = ! empty( $settings['pwreset_generic_response'] ) ? 'checked' : '';
+		?>
+		<label>
+			<input type="checkbox" name="bc_security_settings[pwreset_generic_response]" value="1" <?php echo $checked; ?> />
+			Always show the same confirmation message
+		</label>
+		<p class="description">Stops the reset form from revealing whether an account exists. Without this, WordPress replies "There is no account with that username or email address", which bots use to confirm valid accounts.</p>
+		<?php
+	}
+
+	/**
+	 * Get password reset settings with defaults.
+	 *
+	 * @return array Password reset settings.
+	 */
+	private function get_pwreset_settings(): array {
+		$settings = get_option( 'bc_security_settings', array() );
+		return wp_parse_args( $settings, array(
+			'pwreset_protection'       => true,
+			'pwreset_generic_response' => true,
+		) );
 	}
 
 	/**

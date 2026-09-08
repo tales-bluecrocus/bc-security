@@ -154,10 +154,11 @@ class LogsTable extends \WP_List_Table {
 	 */
 	public function column_form_plugin( $item ): string {
 		$labels = array(
-			'elementor'   => 'Elementor Pro',
-			'cf7'         => 'Contact Form 7',
-			'gravity'     => 'Gravity Forms',
-			'formidable'  => 'Formidable',
+			'elementor'      => 'Elementor Pro',
+			'cf7'            => 'Contact Form 7',
+			'gravity'        => 'Gravity Forms',
+			'formidable'     => 'Formidable',
+			'password_reset' => 'Password Reset',
 		);
 
 		$plugin = $item->form_plugin;
