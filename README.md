@@ -34,6 +34,39 @@ Prevents attackers from discovering valid usernames:
 | Author archives `/author/name/` | 301 redirect to homepage |
 | Query parameter `?author=1` | 301 redirect to homepage |
 
+### Password Reset Protection
+
+Stops bots from abusing the "Lost your password?" form to spam reset emails at your users:
+
+| Vector | Protection |
+|--------|------------|
+| Reset request flood from one IP | Throttled after 3 requests — HTTP 429 for 15 minutes |
+| Distributed flood targeting one account | One reset email per account per 15 minutes |
+| Account enumeration via the reset form | Unknown accounts get the same response as real ones |
+
+**How it works:**
+- After 3 reset requests, the IP receives HTTP 429 with a `Retry-After` header
+- Each account can only be emailed one reset link every 15 minutes, no matter how many
+  different IPs ask — this is what stops a botnet filling a user's inbox
+- The cooldown is enforced *silently*: the page still says "check your email", it just
+  sends nothing. A visible error would confirm the account exists
+- Requests for accounts that do not exist get the identical "check your email" response
+- Reset counters are tracked separately from login lockouts, so reset spam can never lock
+  a legitimate user out of signing in
+- All blocked and sent resets are recorded in the Logs tab
+
+**Why not just remove the "Lost your password?" link?**
+
+Hiding the link does nothing. Bots POST directly to `wp-login.php?action=lostpassword`
+and never read the page. The endpoint stays open whether or not the link is visible.
+
+**Why does WordPress leak account existence by default?**
+
+Core replies "There is no account with that username or email address" for unknown
+accounts, but redirects to `?checkemail=confirm` for real ones. That difference is a
+reliable oracle for confirming which accounts exist, and is typically how a site's users
+end up on a target list in the first place.
+
 ### Form Spam Protection
 
 Blocks spam submissions on contact forms with two layers of defense:
@@ -114,6 +147,10 @@ Constants can be changed in `bc-security.php`:
 ```php
 define( 'BC_MAX_ATTEMPTS', 5 );      // Attempts before lockout.
 define( 'BC_LOCKOUT_SECONDS', 900 ); // Lockout duration in seconds (15 min).
+
+define( 'BC_RESET_MAX_ATTEMPTS', 3 );       // Reset requests per IP before throttling.
+define( 'BC_RESET_WINDOW_SECONDS', 900 );   // Reset throttle duration (15 min).
+define( 'BC_RESET_COOLDOWN_SECONDS', 900 ); // Gap between reset emails per account.
 ```
 
 ## Compatibility
@@ -131,8 +168,10 @@ bc-security/
 ├── src/
 │   ├── IpResolver.php        # Client IP detection behind proxies
 │   ├── BruteForce.php        # Login lockout system (wp-login, XML-RPC, JWT)
+│   ├── PasswordReset.php     # Lost-password throttle + anti-enumeration
 │   ├── UserEnumeration.php   # Block user discovery vectors
 │   ├── UpdateChecker.php     # GitHub-based auto-updater
+│   ├── CaptchaProvider.php   # reCAPTCHA v3 / Turnstile verification
 │   ├── Database.php          # Table migration (bc_form_logs)
 │   ├── FormLogger.php        # Form submission logger
 │   ├── SpamFilter.php        # Honeypot + keyword spam filter
@@ -184,12 +223,21 @@ The plugin uses **WordPress Transients** to store lockout state:
 - Expiration: automatic after 15 minutes
 - No custom database tables
 
+Password reset state uses separate keys so it can never interfere with login lockouts:
+
+- `bc_pwreset_ip_{md5(IP)}` — `{ attempts: N, locked_until: timestamp }`
+- `bc_pwreset_acct_{user_id}` — timestamp of the last reset email sent
+
 ## Known Limitations
 
 - **Does not persist across deploys** if the object cache is cleared
 - **Does not work in distributed setups** without a shared object cache (Redis/Memcached)
 - **No progressive lockout** (e.g., 1h after 10 failures, 24h after 20)
 - **No email notifications** for brute force attempts
+- **Password reset responses still differ in timing** — a request for a real account
+  performs a `wp_mail()` call, so it takes measurably longer than one for an account that
+  does not exist. The response body and status are identical; closing the timing channel
+  entirely would require queued sending.
 
 ## Changelog
 

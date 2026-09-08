@@ -1,3 +1,14 @@
+# [2.3.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.3...v2.3.0) (2026-09-09)
+
+
+### Features
+
+* add PasswordReset class with per-IP throttle and per-account email cooldown
+* return a generic confirmation for unknown accounts on the lost-password form
+* log password reset attempts to the existing form logs table
+* add Password Reset Protection settings section to admin page
+
+
 ## [2.2.3](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.2...v2.2.3) (2026-03-30)
 
 

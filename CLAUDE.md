@@ -21,8 +21,10 @@ bc-security/
 ├── src/
 │   ├── IpResolver.php        # Client IP detection behind proxies
 │   ├── BruteForce.php        # Login lockout system
+│   ├── PasswordReset.php     # Lost-password throttle + anti-enumeration
 │   ├── UserEnumeration.php   # Block user discovery vectors
 │   ├── UpdateChecker.php     # GitHub-based auto-updater
+│   ├── CaptchaProvider.php   # reCAPTCHA v3 / Turnstile verification
 │   ├── Database.php          # Table migration (bc_form_logs)
 │   ├── FormLogger.php        # Form submission logger
 │   ├── SpamFilter.php        # Honeypot + keyword spam filter
@@ -44,6 +46,7 @@ bc-security/
 |-------|---------------|
 | `IpResolver` | Detect real client IP (X-Forwarded-For, X-Real-IP, REMOTE_ADDR) |
 | `BruteForce` | Lockout per IP, failed attempt tracking, 429 response, all login hooks |
+| `PasswordReset` | Per-IP reset throttle, per-account email cooldown, generic reset response |
 | `UserEnumeration` | Block REST API users endpoint, author archives, ?author=N |
 | `UpdateChecker` | GitHub Releases auto-updater via Plugin Update Checker |
 | `CaptchaProvider` | reCAPTCHA v3 / Turnstile CAPTCHA: JS injection, token verification, fail-open |
@@ -82,12 +85,21 @@ JWT Auth       ──┘
 | `rest_endpoints` | filter | Remove /wp/v2/users for unauthenticated |
 | `template_redirect` | action | Redirect author archives to homepage |
 | `parse_request` | action | Block ?author=N enumeration |
+| `login_form_lostpassword` | action | Throttle gate before wp-login processes the reset POST |
+| `login_form_retrievepassword` | action | Same gate — core aliases both action names |
+| `lostpassword_post` | action | Count the reset attempt, apply per-account cooldown |
+| `lostpassword_errors` | filter | Genericize "no such account" into the success response |
+| `retrieve_password_key` | action | Reset mail is going out — start the account cooldown |
 
 ## Constants
 
 ```php
 BC_MAX_ATTEMPTS    = 5    // failures before lockout
 BC_LOCKOUT_SECONDS = 900  // 15 minutes
+
+BC_RESET_MAX_ATTEMPTS      = 3    // reset requests per IP before throttling
+BC_RESET_WINDOW_SECONDS    = 900  // per-IP window and throttle duration
+BC_RESET_COOLDOWN_SECONDS  = 900  // minimum gap between reset emails per account
 ```
 
 Defined in `bc-security.php`. To change, edit the `define()` calls.
@@ -109,6 +121,66 @@ hydra -l USER -P passwords.txt TARGET https-post-form \
 # JWT Auth
 hydra -l USER -P passwords.txt TARGET https-post-form \
   "/wp-json/jwt-auth/v1/token:username=^USER^&password=^PASS^:S=token" -t 4
+```
+
+## How password reset protection works
+
+Handled by `PasswordReset`, covering `wp-login.php?action=lostpassword`. Two independent
+controls plus an anti-enumeration filter:
+
+```
+POST lostpassword ──> login_form_lostpassword ──> per-IP throttle (429 after 3)
+                 └──> lostpassword_post       ──> per-account cooldown (silent)
+                 └──> lostpassword_errors     ──> unknown account => fake success
+```
+
+- **Per-IP throttle** — 3 requests per IP, then HTTP 429 + `Retry-After` for 15 minutes.
+  Overt, because a rate limit reveals nothing about any account.
+- **Per-account cooldown** — one reset email per account per 15 minutes, keyed on the
+  resolved user ID. Enforced **silently**: the request still redirects to
+  `?checkemail=confirm`, it just sends no mail. A visible error here would confirm the
+  account exists.
+- **Generic response** — an unknown account gets the same `302 …?checkemail=confirm` as a
+  real one, closing the enumeration oracle WordPress ships with.
+
+Transient keys are deliberately separate from the brute force lockout:
+
+| Key | Payload |
+|-----|---------|
+| `bc_pwreset_ip_{md5(IP)}` | `array( 'attempts' => int, 'locked_until' => int )` |
+| `bc_pwreset_acct_{user_id}` | timestamp |
+
+### Settings
+
+Stored in `bc_security_settings`:
+- `pwreset_protection` (bool, default **true**) — per-IP throttle + per-account cooldown
+- `pwreset_generic_response` (bool, default **true**) — hide whether an account exists
+
+Both default on, so existing installs are protected as soon as the update lands without
+anyone touching the settings page.
+
+### Logging
+
+Reuses `bc_form_logs` via `FormLogger` with `form_plugin = 'password_reset'` — no schema
+change. Block reasons: `pwreset_ip_limit`, `pwreset_cooldown`, `pwreset_unknown_account`.
+
+### Testing
+
+```bash
+lando wp transient delete --all
+```
+
+Unknown and real accounts must return an identical `302` to `?checkemail=confirm`:
+```bash
+curl -si -X POST "https://SITE/wp-login.php?action=lostpassword" \
+  -d "user_login=nobody@example.com&wp-submit=Get+New+Password" | head -20
+```
+
+Throttle — the 4th request must be `429`:
+```bash
+for i in 1 2 3 4; do curl -so /dev/null -w "%{http_code}\n" \
+  -X POST "https://SITE/wp-login.php?action=lostpassword" \
+  -d "user_login=REAL_USER&wp-submit=Get+New+Password"; done
 ```
 
 ## Spam protection
@@ -164,6 +236,10 @@ Table `wp_bc_form_logs` created via `dbDelta()`. Migration tracked by `bc_securi
 - **IP detection checks X-Forwarded-For first** — needed behind reverse proxies (Cloudflare, nginx). The first IP in the chain is used.
 - **Hydra tests must use `S=` (success pattern)** — when lockout triggers, the response no longer contains the normal failure string, causing false positives with `F=` pattern.
 - **IpResolver is injected** into BruteForce via constructor — allows testing with mock IPs and keeps IP logic separate from lockout logic.
+- **Password reset uses its own transient prefix** (`bc_pwreset_ip_`, not `bc_lockout_`) — reset spam from a shared or NAT'd IP must never lock a legitimate client out of logging in. The two counters are independent on purpose.
+- **The per-account cooldown is silent, the per-IP throttle is not** — returning "too many requests" for a specific account would confirm that account exists, reopening the enumeration oracle the generic response closes. A per-IP rate limit reveals nothing, so it can be overt.
+- **Reset protection is per-account, not just per-IP** — IP-only limiting does nothing against a distributed botnet, which is the actual observed attack. The per-account cooldown is what stops a client's inbox filling up.
+- **`lostpassword_errors` must handle two shapes** — core adds `invalid_email` *before* the filter and `invalidcombo` *after* it, so an unknown account arrives either with an error code already set or with an empty error bag and `$user_data === false`.
 
 ## Release flow
 
