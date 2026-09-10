@@ -199,12 +199,19 @@ class CaptchaProvider {
 			var siteKey   = <?php echo wp_json_encode( $site_key ); ?>;
 			var timeoutMs = 10000;
 			var fieldName = 'bc_captcha_token';
-			var givenUp   = false;
 
-			function bcReady() {
+			// Google's snippet defines grecaptcha.ready() synchronously, as a stub
+			// that queues the callback, well before the rest of the library has
+			// actually finished downloading — that is the whole point of ready(),
+			// per Google's own loading guide. Requiring execute() to already exist
+			// here defeats that: a visitor who submits quickly after the page loads
+			// would find it still missing, and this check would step aside and let
+			// the form go out with no token at all. Availability only means the
+			// stub exists; readiness (including execute()) is confirmed inside the
+			// ready() callback below.
+			function bcAvailable() {
 				return typeof grecaptcha !== 'undefined' &&
-					typeof grecaptcha.ready === 'function' &&
-					typeof grecaptcha.execute === 'function';
+					typeof grecaptcha.ready === 'function';
 			}
 
 			function bcWarn(message) {
@@ -235,86 +242,114 @@ class CaptchaProvider {
 				}
 			}
 
-			function bcBind(form) {
-				if (form.getAttribute('data-bc-captcha') === '1') return;
-				form.setAttribute('data-bc-captcha', '1');
+			// A single delegated listener on the document, in the CAPTURE phase,
+			// rather than one bound to each form. This is deliberate and fixes a
+			// real bug: a bubble-phase listener bound to the form itself only runs
+			// before a form-plugin's OWN submit handler (Elementor, CF7, Gravity,
+			// Formidable) if ours happens to have been registered first — which
+			// depends on script load order and is not something this plugin
+			// controls. When the form plugin's handler ran first, it submitted
+			// immediately with no token, the server correctly rejected it, and our
+			// handler's own retry succeeded moments later — which is exactly what
+			// showed up in testing as every submission needing two attempts.
+			//
+			// A capture-phase listener on document always runs before ANY listener
+			// bound directly on the form, regardless of registration order — that
+			// is how the browser's event dispatch order works, not a race we have
+			// to win. stopPropagation() here stops the event before it reaches the
+			// form at all, so on the intercepted pass the form plugin's own handler
+			// never runs; on the replay pass (below) we deliberately let the event
+			// through untouched so it does.
+			//
+			// This also binds every form on the page once, including ones added
+			// after page load (an Elementor popup, an AJAX-loaded section), which
+			// a one-time DOMContentLoaded scan over existing forms would miss.
+			document.addEventListener('submit', function(e) {
+				var form = e.target;
+				if (!form || form.tagName !== 'FORM') return;
 
-				form.addEventListener('submit', function(e) {
-					// Replay pass: the token is attached, let every other handler run.
-					if (form.bcCaptchaReplay) {
-						form.bcCaptchaReplay = false;
-						// Clear after the current dispatch so a second submission of an
-						// AJAX form gets a fresh token rather than a duplicate.
-						setTimeout(function() {
-							var input = form.querySelector('input[name="' + fieldName + '"]');
-							if (input) input.value = '';
-						}, 0);
-						return;
-					}
-
-					// A request is already in flight; drop the duplicate click.
-					if (form.bcCaptchaPending) {
-						e.preventDefault();
-						return;
-					}
-
-					// Never hold a form hostage to a library that is not there.
-					if (givenUp || !bcReady()) return;
-
-					e.preventDefault();
-					form.bcCaptchaPending = true;
-
-					var done = false;
-
-					function finish(token) {
-						if (done) return;
-						done = true;
-						clearTimeout(timer);
-						form.bcCaptchaPending = false;
-						form.bcCaptchaReplay  = true;
-						bcSetToken(form, token || '');
-						bcResubmit(form);
-					}
-
-					var timer = setTimeout(function() {
-						givenUp = true;
-						bcWarn('reCAPTCHA timed out after ' + timeoutMs + 'ms; submitting without a token.');
-						finish('');
-					}, timeoutMs);
-
-					try {
-						grecaptcha.ready(function() {
-							try {
-								grecaptcha.execute(siteKey, {action: 'submit'}).then(
-									function(token) {
-										finish(token);
-									},
-									function() {
-										givenUp = true;
-										bcWarn('reCAPTCHA execute() was rejected; submitting without a token.');
-										finish('');
-									}
-								);
-							} catch (err) {
-								givenUp = true;
-								bcWarn('reCAPTCHA execute() threw; submitting without a token.');
-								finish('');
-							}
-						});
-					} catch (err) {
-						givenUp = true;
-						bcWarn('grecaptcha.ready() threw; submitting without a token.');
-						finish('');
-					}
-				});
-			}
-
-			document.addEventListener('DOMContentLoaded', function() {
-				var forms = document.querySelectorAll('form');
-				for (var i = 0; i < forms.length; i++) {
-					bcBind(forms[i]);
+				// Replay pass: the token is attached, let every other handler run.
+				if (form.bcCaptchaReplay) {
+					form.bcCaptchaReplay = false;
+					// Clear after the current dispatch so a second submission of an
+					// AJAX form gets a fresh token rather than a duplicate.
+					setTimeout(function() {
+						var input = form.querySelector('input[name="' + fieldName + '"]');
+						if (input) input.value = '';
+					}, 0);
+					return;
 				}
-			});
+
+				// A request is already in flight for this form; drop the duplicate
+				// click rather than letting it through to fail as a wasted extra
+				// submission.
+				if (form.bcCaptchaPending) {
+					e.preventDefault();
+					e.stopPropagation();
+					return;
+				}
+
+				// Never hold a form hostage to a library that is not there at all
+				// (blocked script, ad blocker, network failure). Per-form, not
+				// shared across the page: one form giving up must not silently stop
+				// checking every other form too.
+				if (form.bcCaptchaGivenUp || !bcAvailable()) return;
+
+				e.preventDefault();
+				e.stopPropagation();
+				form.bcCaptchaPending = true;
+
+				var done = false;
+
+				function finish(token) {
+					if (done) return;
+					done = true;
+					clearTimeout(timer);
+					form.bcCaptchaPending = false;
+					form.bcCaptchaReplay  = true;
+					bcSetToken(form, token || '');
+					bcResubmit(form);
+				}
+
+				var timer = setTimeout(function() {
+					form.bcCaptchaGivenUp = true;
+					bcWarn('reCAPTCHA timed out after ' + timeoutMs + 'ms; submitting without a token.');
+					finish('');
+				}, timeoutMs);
+
+				try {
+					grecaptcha.ready(function() {
+						// The stub exists, but the rest of the library may still
+						// be missing pieces in rare cases — check again before use.
+						if (typeof grecaptcha.execute !== 'function') {
+							form.bcCaptchaGivenUp = true;
+							bcWarn('grecaptcha loaded without execute(); submitting without a token.');
+							finish('');
+							return;
+						}
+						try {
+							grecaptcha.execute(siteKey, {action: 'submit'}).then(
+								function(token) {
+									finish(token);
+								},
+								function() {
+									form.bcCaptchaGivenUp = true;
+									bcWarn('reCAPTCHA execute() was rejected; submitting without a token.');
+									finish('');
+								}
+							);
+						} catch (err) {
+							form.bcCaptchaGivenUp = true;
+							bcWarn('reCAPTCHA execute() threw; submitting without a token.');
+							finish('');
+						}
+					});
+				} catch (err) {
+					form.bcCaptchaGivenUp = true;
+					bcWarn('grecaptcha.ready() threw; submitting without a token.');
+					finish('');
+				}
+			}, true);
 		})();
 		</script>
 		<?php
