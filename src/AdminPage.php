@@ -40,10 +40,17 @@ class AdminPage {
 	);
 
 	/**
-	 * @param FormLogger $logger Form submission logger.
+	 * @var CaptchaProvider|null
 	 */
-	public function __construct( FormLogger $logger ) {
-		$this->logger = $logger;
+	private $captcha;
+
+	/**
+	 * @param FormLogger           $logger  Form submission logger.
+	 * @param CaptchaProvider|null $captcha Optional CAPTCHA provider.
+	 */
+	public function __construct( FormLogger $logger, ?CaptchaProvider $captcha = null ) {
+		$this->logger  = $logger;
+		$this->captcha = $captcha;
 	}
 
 	/**
@@ -54,6 +61,8 @@ class AdminPage {
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_init', array( $this, 'handle_clear_logs' ) );
 		add_action( 'admin_footer', array( $this, 'render_captcha_admin_js' ) );
+		add_action( 'admin_notices', array( $this, 'render_captcha_error_notice' ) );
+		add_action( 'wp_ajax_bc_test_captcha', array( $this, 'handle_test_captcha' ) );
 	}
 
 	/**
@@ -162,6 +171,14 @@ class AdminPage {
 			'captcha_on_lostpassword',
 			'Protect Lost Password Form',
 			array( $this, 'render_captcha_lostpassword_field' ),
+			'bc-security',
+			'bc_security_captcha_section'
+		);
+
+		add_settings_field(
+			'captcha_test',
+			'Test CAPTCHA Keys',
+			array( $this, 'render_captcha_test_field' ),
 			'bc-security',
 			'bc_security_captcha_section'
 		);
@@ -309,7 +326,7 @@ class AdminPage {
 	public function render_captcha_site_key_field(): void {
 		$settings = $this->get_captcha_settings();
 		?>
-		<input type="text" name="bc_security_settings[captcha_site_key]" value="<?php echo esc_attr( $settings['captcha_site_key'] ); ?>" class="regular-text bc-captcha-field" />
+		<input type="text" id="bc_captcha_site_key" name="bc_security_settings[captcha_site_key]" value="<?php echo esc_attr( $settings['captcha_site_key'] ); ?>" class="regular-text bc-captcha-field" />
 		<?php
 	}
 
@@ -319,7 +336,7 @@ class AdminPage {
 	public function render_captcha_secret_key_field(): void {
 		$settings = $this->get_captcha_settings();
 		?>
-		<input type="password" name="bc_security_settings[captcha_secret_key]" value="<?php echo esc_attr( $settings['captcha_secret_key'] ); ?>" class="regular-text bc-captcha-field" />
+		<input type="password" id="bc_captcha_secret_key" name="bc_security_settings[captcha_secret_key]" value="<?php echo esc_attr( $settings['captcha_secret_key'] ); ?>" class="regular-text bc-captcha-field" />
 		<?php
 	}
 
@@ -360,6 +377,81 @@ class AdminPage {
 			Enable CAPTCHA on the "Lost your password?" form
 		</label>
 		<p class="description">Verifies reset requests before an email is generated. Safer to enable than login protection: if CAPTCHA misfires here, password recovery is blocked, whereas on the login form nobody can sign in at all.</p>
+		<?php
+	}
+
+	/**
+	 * Render the "Test CAPTCHA Keys" button and result area.
+	 *
+	 * type="button" is load-bearing: a bare <button> inside the settings form
+	 * defaults to submit and would save the settings as a side effect.
+	 */
+	public function render_captcha_test_field(): void {
+		?>
+		<button type="button" class="button bc-captcha-field" id="bc_captcha_test_button">Test Keys</button>
+		<span id="bc_captcha_test_result" style="margin-left:10px;"></span>
+		<p class="description bc-captcha-field">Checks the secret key against the provider without saving. Worth running before you rely on CAPTCHA on a site, and again if forms start behaving oddly.</p>
+		<?php
+	}
+
+	/**
+	 * Handle the AJAX key test.
+	 *
+	 * Tests the values currently in the form, not the saved ones, so a pasted key
+	 * can be checked before committing to it. Saves nothing.
+	 */
+	public function handle_test_captcha(): void {
+		check_ajax_referer( 'bc_test_captcha', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => 'Insufficient permissions.' ), 403 );
+		}
+
+		if ( ! $this->captcha ) {
+			wp_send_json_error( array( 'message' => 'CAPTCHA provider unavailable.' ) );
+		}
+
+		$provider = isset( $_POST['provider'] ) ? sanitize_text_field( wp_unslash( $_POST['provider'] ) ) : '';
+		$secret   = isset( $_POST['secret'] ) ? sanitize_text_field( wp_unslash( $_POST['secret'] ) ) : '';
+
+		$result = $this->captcha->test_keys( $provider, $secret );
+
+		if ( ! empty( $result['ok'] ) ) {
+			wp_send_json_success( array( 'message' => $result['message'] ) );
+		}
+
+		wp_send_json_error( array( 'message' => $result['message'] ) );
+	}
+
+	/**
+	 * Surface the most recent CAPTCHA configuration fault.
+	 *
+	 * A fault means verify() is failing open, so the CAPTCHA layer is silently
+	 * doing nothing. Shown on every admin screen because nobody visits a settings
+	 * page to discover that a security control stopped working.
+	 */
+	public function render_captcha_error_notice(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		$error = get_transient( CaptchaProvider::ERROR_TRANSIENT );
+
+		if ( ! is_array( $error ) || empty( $error['codes'] ) ) {
+			return;
+		}
+
+		$codes = implode( ', ', array_map( 'sanitize_text_field', (array) $error['codes'] ) );
+		$url   = admin_url( 'admin.php?page=bc-security' );
+		?>
+		<div class="notice notice-error">
+			<p>
+				<strong>BlueCrocus Security:</strong>
+				CAPTCHA verification is failing (<code><?php echo esc_html( $codes ); ?></code>).
+				Submissions are being allowed through unchecked until this is fixed.
+				<a href="<?php echo esc_url( $url ); ?>">Check your CAPTCHA settings</a>.
+			</p>
+		</div>
 		<?php
 	}
 
@@ -459,6 +551,43 @@ class AdminPage {
 
 			provider.addEventListener('change', toggle);
 			toggle();
+
+			var testButton = document.getElementById('bc_captcha_test_button');
+			var testResult = document.getElementById('bc_captcha_test_result');
+			if (!testButton || !testResult) return;
+
+			testButton.addEventListener('click', function() {
+				var secretField = document.getElementById('bc_captcha_secret_key');
+
+				testButton.disabled = true;
+				testResult.textContent = 'Testing…';
+				testResult.style.color = '';
+
+				var body = new URLSearchParams();
+				body.append('action', 'bc_test_captcha');
+				body.append('nonce', <?php echo wp_json_encode( wp_create_nonce( 'bc_test_captcha' ) ); ?>);
+				body.append('provider', provider.value);
+				body.append('secret', secretField ? secretField.value : '');
+
+				fetch(<?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, {
+					method: 'POST',
+					credentials: 'same-origin',
+					headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+					body: body.toString()
+				}).then(function(r) {
+					return r.json();
+				}).then(function(json) {
+					var ok = json && json.success;
+					var message = (json && json.data && json.data.message) ? json.data.message : 'Unexpected response.';
+					testResult.textContent = message;
+					testResult.style.color = ok ? '#008a20' : '#d63638';
+				}).catch(function() {
+					testResult.textContent = 'Could not reach the site. Check your connection and try again.';
+					testResult.style.color = '#d63638';
+				}).then(function() {
+					testButton.disabled = false;
+				});
+			});
 		})();
 		</script>
 		<?php

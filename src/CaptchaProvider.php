@@ -444,6 +444,86 @@ class CaptchaProvider {
 	}
 
 	/**
+	 * Check whether a secret key is accepted by its provider.
+	 *
+	 * Deliberately sends an invalid token. If the provider rejects the *token*, the
+	 * secret was accepted and the key is good; if it rejects the *secret*, the key
+	 * is broken. Takes the values as arguments rather than reading settings, so an
+	 * admin can test a pasted key before saving it.
+	 *
+	 * @param string $provider   Provider slug.
+	 * @param string $secret_key Secret key to test.
+	 * @return array Array with 'ok' (bool) and 'message' (string).
+	 */
+	public function test_keys( string $provider, string $secret_key ): array {
+		$endpoints = array(
+			'recaptcha_v3' => 'https://www.google.com/recaptcha/api/siteverify',
+			'turnstile'    => 'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+		);
+
+		if ( ! isset( $endpoints[ $provider ] ) ) {
+			return array( 'ok' => false, 'message' => 'Select a CAPTCHA provider first.' );
+		}
+
+		if ( empty( $secret_key ) ) {
+			return array( 'ok' => false, 'message' => 'Enter a secret key first.' );
+		}
+
+		$response = wp_remote_post( $endpoints[ $provider ], array(
+			'body' => array(
+				'secret'   => $secret_key,
+				'response' => 'bc-security-key-test',
+			),
+			'timeout' => 10,
+		) );
+
+		if ( is_wp_error( $response ) ) {
+			return array(
+				'ok'      => false,
+				'message' => 'Could not reach the provider: ' . $response->get_error_message(),
+			);
+		}
+
+		$status = (int) wp_remote_retrieve_response_code( $response );
+
+		if ( $status < 200 || $status > 299 ) {
+			return array( 'ok' => false, 'message' => "Provider returned HTTP {$status}." );
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		if ( ! is_array( $body ) ) {
+			return array( 'ok' => false, 'message' => 'Provider returned a response we could not read.' );
+		}
+
+		$codes = isset( $body['error-codes'] ) && is_array( $body['error-codes'] )
+			? array_map( 'strval', $body['error-codes'] )
+			: array();
+
+		$secret_codes = array( 'invalid-input-secret', 'missing-input-secret', 'invalid-parsed-secret', 'invalid-keys' );
+
+		if ( array_intersect( $codes, $secret_codes ) ) {
+			return array(
+				'ok'      => false,
+				'message' => 'Secret key rejected (' . implode( ', ', $codes ) . '). Forms will fail open until this is fixed.',
+			);
+		}
+
+		// The secret was accepted — the only complaint is our deliberately bad token.
+		$token_codes = array( 'invalid-input-response', 'missing-input-response', 'timeout-or-duplicate', 'bad-request' );
+
+		if ( array_intersect( $codes, $token_codes ) ) {
+			return array( 'ok' => true, 'message' => 'Secret key accepted. CAPTCHA verification is working.' );
+		}
+
+		if ( empty( $codes ) ) {
+			return array( 'ok' => false, 'message' => 'Provider gave no verdict. Try again shortly.' );
+		}
+
+		return array( 'ok' => false, 'message' => 'Unexpected response: ' . implode( ', ', $codes ) );
+	}
+
+	/**
 	 * Read the CAPTCHA token from POST data.
 	 *
 	 * @return string Token value or empty string.

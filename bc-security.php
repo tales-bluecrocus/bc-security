@@ -57,7 +57,7 @@ $bc_logger = new BcSecurity\FormLogger();
 
 // Admin UI.
 if ( is_admin() ) {
-	( new BcSecurity\AdminPage( $bc_logger ) )->register();
+	( new BcSecurity\AdminPage( $bc_logger, $bc_captcha ) )->register();
 }
 
 // Run migration on plugin activation.
