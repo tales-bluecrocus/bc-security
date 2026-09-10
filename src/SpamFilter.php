@@ -343,6 +343,9 @@ class SpamFilter {
 		$post_data = $_POST;
 		$fields    = array();
 
+		// CAPTCHA tokens are 1–2 KB of random base64. Scanned as text, short keywords
+		// ("seo", "btc", "nft", "ico", "cbd", "mlm") turn up in roughly a quarter of
+		// them by pure chance, silently blocking real visitors as spam.
 		$skip_keys = array(
 			'bc_hp_field',
 			'_wpnonce',
@@ -352,6 +355,11 @@ class SpamFilter {
 			'post_id',
 			'queried_id',
 			'referrer_title',
+			'bc_captcha_token',
+			'bc_captcha_error',
+			'g-recaptcha-response',
+			'cf-turnstile-response',
+			'_wpcf7_recaptcha_response',
 		);
 
 		foreach ( $post_data as $key => $value ) {
