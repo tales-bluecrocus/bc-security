@@ -1,22 +1,36 @@
-# [2.4.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.3.0...v2.4.0) (2026-09-10)
+# [2.4.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.3.0...v2.4.0) (2026-09-11)
 
 
 ### Features
 
-* add CAPTCHA protection for the lost password form, separate from the login toggle
-* add a Test CAPTCHA Keys button that checks a secret key without saving settings
+* add a visible "I'm not a robot" check (Google reCAPTCHA v2 or Cloudflare Turnstile) to the lost password form
+* show that check to a connection that hit the login limit, instead of the 15-minute lockout, so CAPTCHA can never lock anyone out
+* choose contact-form CAPTCHA per site: off (default), the same checkbox, or invisible reCAPTCHA v3 with its own keys
+* test keys with a genuine token from the administrator's browser; keys only take effect once they pass on this site's address
+* warn on every admin screen when tested keys start failing, and when saved keys have not been tested
+* leave Elementor forms that carry their own configured reCAPTCHA (v2 or v3) to Elementor
 * warn in the admin when another active plugin is also serving a CAPTCHA
-* raise an admin notice when CAPTCHA verification is failing open
 
 
 ### Bug Fixes
 
+* stop the keyword filter scanning CAPTCHA tokens, which blocked roughly one in four real enquiries on sites using CAPTCHA
+* leave an administrator's "Send password reset" from the Users screen alone instead of throttling it
+* count a login with an unknown username as one failed attempt, not two
+* intercept reCAPTCHA v3 submissions in the capture phase so forms submit on the first click
 * clear the CAPTCHA token after each submit so AJAX forms stop replaying a spent token
 * stop a failed CAPTCHA script from leaving forms permanently unsubmittable
-* fail open on CAPTCHA configuration faults instead of blocking every submission
-* require both CAPTCHA keys before verifying, so a blank site key no longer blocks all forms
 * shape-check tokens locally so bad-request cannot be provoked into a bypass
 * use IpResolver for the provider remoteip parameter instead of the CDN edge address
+
+
+### Upgrade Notes
+
+* contact-form CAPTCHA is switched off on every site; switch it back on per site under "CAPTCHA — Contact forms"
+* existing reCAPTCHA v3 keys move to the contact-form Invisible slot; existing Turnstile keys stay for login and password reset. Neither is used until it passes Test Keys
+* the old "Protect Login Page" option is replaced by the login check for flagged connections; reCAPTCHA v3 is no longer offered for login or password reset
+* sites that used CAPTCHA see a one-time notice explaining the change
+* after pushing staging to live, run Test Keys again on the live site
 
 
 # [2.3.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.3...v2.3.0) (2026-09-09)
