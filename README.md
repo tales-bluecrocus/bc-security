@@ -98,17 +98,41 @@ Add an extra layer of bot protection with reCAPTCHA v3 or Cloudflare Turnstile.
    - **Cloudflare Turnstile**: Get keys at [Cloudflare Dashboard](https://dash.cloudflare.com/turnstile)
 3. Enter your Site Key and Secret Key
 4. For reCAPTCHA v3, adjust the Score Threshold (default 0.5)
-5. Optionally enable "Protect Login Page"
+5. Click **Test Keys** to confirm the secret key is accepted before relying on it
+6. Optionally enable **Protect Login Page** and/or **Protect Lost Password Form**
 
 **How it works:**
 - Runs invisibly — no user interaction required
 - Checks every form submission before honeypot and keyword filters
-- Fail-open: if the CAPTCHA API is down, forms still work (honeypot + keywords still protect)
 - All blocked submissions are logged with the reason (e.g., `captcha_score:0.3`)
+
+**Which toggle to enable first:** the two forms share `wp-login.php`, but the blast radius
+differs. If CAPTCHA misfires on the login form nobody can sign in to the site; if it
+misfires on the reset form only password recovery is blocked, and an admin can still reset
+a password from the dashboard. Reset protection is the safer one to switch on first, and it
+is where automated abuse actually concentrates.
+
+**When verification fails, what happens:**
+
+| Situation | Result |
+|-----------|--------|
+| Provider unreachable, or returns an error/garbled response | Submission **allowed**, admin warned |
+| Your key is invalid, expired or mistyped | Submission **allowed**, admin warned |
+| The visitor sent a bad, missing or reused token | Submission **blocked** |
+| Score below your threshold | Submission **blocked** |
+
+The plugin fails open on its own misconfiguration rather than silently rejecting real
+customers, and raises an admin notice on every screen so a broken key gets noticed.
+Honeypot and keyword filtering keep running for contact forms either way.
+
+**Conflicts:** if another plugin (Wordfence, Solid Security, Elementor Pro, WPForms and
+others) is also serving a CAPTCHA, a warning appears in the settings. Running two on one
+form makes submissions fail intermittently and consumes double the monthly quota, without
+catching more bots.
 
 ## Requirements
 
-- WordPress 5.0+
+- WordPress 5.5+
 - PHP 7.4+
 - Composer (for autoload)
 
@@ -172,6 +196,7 @@ bc-security/
 │   ├── UserEnumeration.php   # Block user discovery vectors
 │   ├── UpdateChecker.php     # GitHub-based auto-updater
 │   ├── CaptchaProvider.php   # reCAPTCHA v3 / Turnstile verification
+│   ├── CaptchaConflicts.php  # Detects competing CAPTCHA plugins
 │   ├── Database.php          # Table migration (bc_form_logs)
 │   ├── FormLogger.php        # Form submission logger
 │   ├── SpamFilter.php        # Honeypot + keyword spam filter

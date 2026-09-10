@@ -1,3 +1,24 @@
+# [2.4.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.3.0...v2.4.0) (2026-09-10)
+
+
+### Features
+
+* add CAPTCHA protection for the lost password form, separate from the login toggle
+* add a Test CAPTCHA Keys button that checks a secret key without saving settings
+* warn in the admin when another active plugin is also serving a CAPTCHA
+* raise an admin notice when CAPTCHA verification is failing open
+
+
+### Bug Fixes
+
+* clear the CAPTCHA token after each submit so AJAX forms stop replaying a spent token
+* stop a failed CAPTCHA script from leaving forms permanently unsubmittable
+* fail open on CAPTCHA configuration faults instead of blocking every submission
+* require both CAPTCHA keys before verifying, so a blank site key no longer blocks all forms
+* shape-check tokens locally so bad-request cannot be provoked into a bypass
+* use IpResolver for the provider remoteip parameter instead of the CDN edge address
+
+
 # [2.3.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.3...v2.3.0) (2026-09-09)
 
 

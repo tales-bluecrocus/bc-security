@@ -25,6 +25,7 @@ bc-security/
 │   ├── UserEnumeration.php   # Block user discovery vectors
 │   ├── UpdateChecker.php     # GitHub-based auto-updater
 │   ├── CaptchaProvider.php   # reCAPTCHA v3 / Turnstile verification
+│   ├── CaptchaConflicts.php  # Detects competing CAPTCHA plugins
 │   ├── Database.php          # Table migration (bc_form_logs)
 │   ├── FormLogger.php        # Form submission logger
 │   ├── SpamFilter.php        # Honeypot + keyword spam filter
@@ -49,7 +50,8 @@ bc-security/
 | `PasswordReset` | Per-IP reset throttle, per-account email cooldown, generic reset response |
 | `UserEnumeration` | Block REST API users endpoint, author archives, ?author=N |
 | `UpdateChecker` | GitHub Releases auto-updater via Plugin Update Checker |
-| `CaptchaProvider` | reCAPTCHA v3 / Turnstile CAPTCHA: JS injection, token verification, fail-open |
+| `CaptchaProvider` | reCAPTCHA v3 / Turnstile: JS injection, token verification, config-fault classification, key testing |
+| `CaptchaConflicts` | Detects other active plugins also serving a CAPTCHA (informational only) |
 | `Database` | Creates/updates `wp_bc_form_logs` table via dbDelta |
 | `FormLogger` | Insert/query/clear form submission logs |
 | `SpamFilter` | Honeypot injection + keyword filter for Elementor/CF7/Gravity/Formidable |
@@ -90,6 +92,8 @@ JWT Auth       ──┘
 | `lostpassword_post` | action | Count the reset attempt, apply per-account cooldown |
 | `lostpassword_errors` | filter | Genericize "no such account" into the success response |
 | `retrieve_password_key` | action | Reset mail is going out — start the account cooldown |
+| `admin_notices` | action | Surface a CAPTCHA configuration fault on every admin screen |
+| `wp_ajax_bc_test_captcha` | action | Test a CAPTCHA secret key without saving settings |
 
 ## Constants
 
@@ -216,8 +220,38 @@ Settings stored in `bc_security_settings`:
 - `captcha_secret_key` (string)
 - `captcha_score_threshold` (float, default 0.5, reCAPTCHA v3 only)
 - `captcha_on_login` (bool, default false)
+- `captcha_on_lostpassword` (bool, default false)
 
-When enabled, CAPTCHA runs as the first check before honeypot and keywords. Fail-open on API errors (other layers still protect). CAPTCHA failure on login does NOT count as a brute force attempt.
+When enabled, CAPTCHA runs as the first check before honeypot and keywords. CAPTCHA failure on login does NOT count as a brute force attempt (though core's `wp_login_failed` still fires, so it costs one attempt indirectly).
+
+**Adding a CAPTCHA setting requires four edits** or it silently does nothing:
+`CaptchaProvider::get_settings()`, `AdminPage::get_captcha_settings()` (duplicated defaults),
+`AdminPage::sanitize_settings()` (rebuilds from scratch — an unlisted key is dropped on every
+save), and a new `add_settings_field()` + renderer carrying `class="bc-captcha-field"`.
+
+#### Fail-open / fail-closed matrix
+
+`verify()` distinguishes faults that are ours from verdicts about the visitor:
+
+| Condition | Result |
+|-----------|--------|
+| Provider `off`, or either key blank | open (no check possible) |
+| Transport error, non-2xx status, unparseable body | **open** + recorded |
+| Error code in `$config_error_codes` (bad/missing secret, bad-request, internal-error) | **open** + recorded |
+| Empty `error-codes` array (undocumented) | **open** + recorded |
+| `invalid-input-response`, `missing-input-response`, `timeout-or-duplicate` | **closed** |
+| Missing token, or token failing `is_plausible_token()` | **closed** |
+| Score below threshold | **closed** |
+
+Fail-open returns `reason = 'captcha_unavailable'` and writes the
+`bc_captcha_last_error` transient (6h), surfaced by `AdminPage::render_captcha_error_notice()`
+on every admin screen. Cleared on settings save.
+
+#### Testing keys
+
+"Test CAPTCHA Keys" (`wp_ajax_bc_test_captcha` → `CaptchaProvider::test_keys()`) sends a
+deliberately invalid token. Provider rejects the *token* ⇒ secret is good; rejects the
+*secret* ⇒ key is broken. Reads the unsaved form values; saves nothing.
 
 ### Admin page
 
@@ -227,7 +261,7 @@ Menu: "BlueCrocus Security" (dashicons-shield-alt), capability: `manage_options`
 
 ### Database
 
-Table `wp_bc_form_logs` created via `dbDelta()`. Migration tracked by `bc_security_db_version` option. Runs on activation and on `plugins_loaded` with version check.
+Table `wp_bc_form_logs` created via `dbDelta()`. Migration tracked by `bc_security_db_version` option. Runs on activation and at plugin-load time with a version check (`bc-security.php` calls it at file-include time, not on `plugins_loaded`).
 
 ## Key decisions
 
@@ -240,6 +274,13 @@ Table `wp_bc_form_logs` created via `dbDelta()`. Migration tracked by `bc_securi
 - **The per-account cooldown is silent, the per-IP throttle is not** — returning "too many requests" for a specific account would confirm that account exists, reopening the enumeration oracle the generic response closes. A per-IP rate limit reveals nothing, so it can be overt.
 - **Reset protection is per-account, not just per-IP** — IP-only limiting does nothing against a distributed botnet, which is the actual observed attack. The per-account cooldown is what stops a client's inbox filling up.
 - **`lostpassword_errors` must handle two shapes** — core adds `invalid_email` *before* the filter and `invalidcombo` *after* it, so an unknown account arrives either with an error code already set or with an empty error bag and `$user_data === false`.
+- **Config faults fail open, bot verdicts fail closed** — blocking every visitor because a key expired is worse than briefly losing the check, and the other spam layers still run for contact forms. The inverse (failing closed on our own misconfiguration) caused silent site-wide outages.
+- **`bad-request` fails open, so tokens are shape-checked locally first** — it is the one config code a visitor could provoke by sending garbage, which would otherwise be a free CAPTCHA bypass. **If `is_plausible_token()` is ever loosened, move `bad-request` to the fail-closed list.**
+- **CAPTCHA faults go to a transient + admin notice, not `bc_form_logs`** — a config fault is not a submission, and `LogsTable::column_status()` renders any non-`blocked` status as a green "Sent" badge, so it would display as a successful send. The transient is only rewritten when the payload changes, so a flood against a broken key cannot become one DB write per request.
+- **`PasswordReset::check_captcha()` must `remove('invalid_email')` before adding `captcha_failed`** — core adds it before the hook; left in place WordPress prints "There is no account with that username or email address" beside the CAPTCHA error, handing the enumeration oracle back to any bot that simply omits the token.
+- **The CAPTCHA JS never `preventDefault()`s before confirming the library is usable** — it previously did, so a blocked script left the form permanently unsubmittable (on wp-login.php: nobody can sign in). Readiness is checked at *submit* time, not `DOMContentLoaded`, because the inline script prints before `api.js`.
+- **The token is single-use and cleared after each submit** — all four form plugins submit by AJAX and stay on the page, so a retained token was replayed on the second submission and rejected as `timeout-or-duplicate`.
+- **`captcha_on_lostpassword` is separate from `captcha_on_login`** — both forms live on `wp-login.php`, but a misfire on login locks everyone out of the site while a misfire on reset only blocks password recovery. `CaptchaProvider::register()` loads the login-page scripts when **either** is on; gating only on `captcha_on_login` would mean enabling reset protection alone blocks every reset.
 
 ## Release flow
 
