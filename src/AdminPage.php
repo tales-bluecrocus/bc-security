@@ -303,6 +303,27 @@ class AdminPage {
 	 */
 	public function render_captcha_section_description(): void {
 		echo '<p>Add CAPTCHA verification to forms and login. Requires a free API key from Google reCAPTCHA or Cloudflare Turnstile.</p>';
+
+		$settings = $this->get_captcha_settings();
+
+		// Nothing to conflict with while our own CAPTCHA is off.
+		if ( $settings['captcha_provider'] === 'off' ) {
+			return;
+		}
+
+		$conflicts = ( new CaptchaConflicts() )->detect();
+
+		if ( ! empty( $conflicts['configured'] ) ) {
+			echo '<div class="notice notice-warning inline"><p><strong>Another CAPTCHA is already configured:</strong> '
+				. esc_html( implode( ', ', $conflicts['configured'] ) )
+				. '. Two CAPTCHAs on one form make submissions fail intermittently and consume double the monthly quota. Turn one of them off.</p></div>';
+		}
+
+		if ( ! empty( $conflicts['possible'] ) ) {
+			echo '<div class="notice notice-info inline"><p>'
+				. esc_html( implode( ', ', $conflicts['possible'] ) )
+				. ' can also add a CAPTCHA to the login form. If it is enabled there, disable it in one place or the other.</p></div>';
+		}
 	}
 
 	/**
