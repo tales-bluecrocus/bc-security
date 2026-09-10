@@ -130,44 +130,139 @@ class CaptchaProvider {
 	/**
 	 * Render reCAPTCHA v3 token injection script.
 	 *
+	 * Interception is conditional: the form is only held back when the library is
+	 * actually usable, and any timeout or rejection releases it. A form that cannot
+	 * obtain a token submits without one and is rejected server-side as
+	 * captcha_missing, which is visible in the logs and recoverable by retrying.
+	 * A form frozen by an unresolved promise is neither.
+	 *
+	 * The token is single-use: it is cleared after the replay dispatch so that a
+	 * second submission of an AJAX form obtains a fresh one instead of replaying
+	 * the old token and being rejected as timeout-or-duplicate.
+	 *
 	 * @param string $site_key reCAPTCHA site key.
 	 */
 	private function render_recaptcha_js( string $site_key ): void {
 		?>
 		<script>
 		(function() {
-			function bcAddRecaptchaToken(form) {
-				if (form.querySelector('input[name="bc_captcha_token"]')) return;
+			var siteKey   = <?php echo wp_json_encode( $site_key ); ?>;
+			var timeoutMs = 10000;
+			var fieldName = 'bc_captcha_token';
+			var givenUp   = false;
+
+			function bcReady() {
+				return typeof grecaptcha !== 'undefined' &&
+					typeof grecaptcha.ready === 'function' &&
+					typeof grecaptcha.execute === 'function';
+			}
+
+			function bcWarn(message) {
+				if (window.console && console.warn) {
+					console.warn('bc-security: ' + message);
+				}
+			}
+
+			function bcSetToken(form, token) {
+				var input = form.querySelector('input[name="' + fieldName + '"]');
+				if (!input) {
+					input = document.createElement('input');
+					input.type = 'hidden';
+					input.name = fieldName;
+					form.appendChild(input);
+				}
+				input.value = token;
+			}
+
+			function bcResubmit(form) {
+				var btn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+				if (btn) {
+					btn.click();
+				} else if (form.requestSubmit) {
+					form.requestSubmit();
+				} else {
+					form.submit();
+				}
+			}
+
+			function bcBind(form) {
+				if (form.getAttribute('data-bc-captcha') === '1') return;
+				form.setAttribute('data-bc-captcha', '1');
+
 				form.addEventListener('submit', function(e) {
-					var existing = form.querySelector('input[name="bc_captcha_token"]');
-					if (existing && existing.value) return;
+					// Replay pass: the token is attached, let every other handler run.
+					if (form.bcCaptchaReplay) {
+						form.bcCaptchaReplay = false;
+						// Clear after the current dispatch so a second submission of an
+						// AJAX form gets a fresh token rather than a duplicate.
+						setTimeout(function() {
+							var input = form.querySelector('input[name="' + fieldName + '"]');
+							if (input) input.value = '';
+						}, 0);
+						return;
+					}
+
+					// A request is already in flight; drop the duplicate click.
+					if (form.bcCaptchaPending) {
+						e.preventDefault();
+						return;
+					}
+
+					// Never hold a form hostage to a library that is not there.
+					if (givenUp || !bcReady()) return;
+
 					e.preventDefault();
-					grecaptcha.ready(function() {
-						grecaptcha.execute(<?php echo wp_json_encode( $site_key ); ?>, {action: 'submit'}).then(function(token) {
-							var input = form.querySelector('input[name="bc_captcha_token"]');
-							if (!input) {
-								input = document.createElement('input');
-								input.type = 'hidden';
-								input.name = 'bc_captcha_token';
-								form.appendChild(input);
-							}
-							input.value = token;
-							var btn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
-							if (btn) {
-								btn.click();
-							} else if (form.requestSubmit) {
-								form.requestSubmit();
-							} else {
-								form.submit();
+					form.bcCaptchaPending = true;
+
+					var done = false;
+
+					function finish(token) {
+						if (done) return;
+						done = true;
+						clearTimeout(timer);
+						form.bcCaptchaPending = false;
+						form.bcCaptchaReplay  = true;
+						bcSetToken(form, token || '');
+						bcResubmit(form);
+					}
+
+					var timer = setTimeout(function() {
+						givenUp = true;
+						bcWarn('reCAPTCHA timed out after ' + timeoutMs + 'ms; submitting without a token.');
+						finish('');
+					}, timeoutMs);
+
+					try {
+						grecaptcha.ready(function() {
+							try {
+								grecaptcha.execute(siteKey, {action: 'submit'}).then(
+									function(token) {
+										finish(token);
+									},
+									function() {
+										givenUp = true;
+										bcWarn('reCAPTCHA execute() was rejected; submitting without a token.');
+										finish('');
+									}
+								);
+							} catch (err) {
+								givenUp = true;
+								bcWarn('reCAPTCHA execute() threw; submitting without a token.');
+								finish('');
 							}
 						});
-					});
+					} catch (err) {
+						givenUp = true;
+						bcWarn('grecaptcha.ready() threw; submitting without a token.');
+						finish('');
+					}
 				});
 			}
+
 			document.addEventListener('DOMContentLoaded', function() {
 				var forms = document.querySelectorAll('form');
 				for (var i = 0; i < forms.length; i++) {
-					bcAddRecaptchaToken(forms[i]);
+					bcBind(forms[i]);
 				}
 			});
 		})();
@@ -178,22 +273,68 @@ class CaptchaProvider {
 	/**
 	 * Render Cloudflare Turnstile token injection script.
 	 *
+	 * Unlike the reCAPTCHA path this never intercepts submission — the widget
+	 * populates cf-turnstile-response on its own — so there is no way to deadlock
+	 * a form here. What it does need is a reset after each submission: Turnstile
+	 * tokens are single-use, so an AJAX form that stays on the page would
+	 * otherwise replay a spent token and be rejected as timeout-or-duplicate.
+	 *
 	 * @param string $site_key Turnstile site key.
 	 */
 	private function render_turnstile_js( string $site_key ): void {
 		?>
 		<script>
 		(function() {
+			var siteKey = <?php echo wp_json_encode( $site_key ); ?>;
+
+			function bcWarn(message) {
+				if (window.console && console.warn) {
+					console.warn('bc-security: ' + message);
+				}
+			}
+
 			document.addEventListener('DOMContentLoaded', function() {
-				if (typeof turnstile === 'undefined') return;
+				if (typeof turnstile === 'undefined' || typeof turnstile.render !== 'function') {
+					bcWarn('Turnstile library unavailable; forms submit without a token.');
+					return;
+				}
+
 				var forms = document.querySelectorAll('form');
+
 				for (var i = 0; i < forms.length; i++) {
-					var container = document.createElement('div');
-					container.className = 'cf-turnstile';
-					container.setAttribute('data-sitekey', <?php echo wp_json_encode( $site_key ); ?>);
-					container.setAttribute('data-size', 'invisible');
-					forms[i].appendChild(container);
-					turnstile.render(container);
+					(function(form) {
+						if (form.getAttribute('data-bc-captcha') === '1') return;
+						form.setAttribute('data-bc-captcha', '1');
+
+						var container = document.createElement('div');
+						container.className = 'cf-turnstile';
+						container.setAttribute('data-sitekey', siteKey);
+						container.setAttribute('data-size', 'invisible');
+						form.appendChild(container);
+
+						var widgetId;
+
+						try {
+							widgetId = turnstile.render(container);
+						} catch (err) {
+							bcWarn('Turnstile render() failed; this form submits without a token.');
+							return;
+						}
+
+						form.addEventListener('submit', function() {
+							// Reset after the current dispatch so the widget issues a
+							// fresh token for any subsequent submission of this form.
+							setTimeout(function() {
+								try {
+									if (typeof turnstile.reset === 'function') {
+										turnstile.reset(widgetId);
+									}
+								} catch (err) {
+									bcWarn('Turnstile reset() failed; the next submission may be rejected as a duplicate.');
+								}
+							}, 0);
+						});
+					})(forms[i]);
 				}
 			});
 		})();
