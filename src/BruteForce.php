@@ -171,8 +171,9 @@ class BruteForce {
 		}
 
 		// Block non-existent usernames immediately — kills distributed brute force.
+		// No explicit record_failed_attempt() here: core fires wp_login_failed for
+		// this error, and counting it here as well charged two attempts per guess.
 		if ( ! username_exists( $username ) && ! email_exists( $username ) ) {
-			$this->record_failed_attempt( $ip );
 			return new \WP_Error(
 				'authentication_failed',
 				'<strong>Error:</strong> The username or password you entered is incorrect.'
