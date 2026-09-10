@@ -41,7 +41,7 @@ require __DIR__ . '/vendor/autoload.php';
 ( new BcSecurity\Database() )->maybe_create_tables();
 
 // Security features.
-$bc_captcha = new BcSecurity\CaptchaProvider();
+$bc_captcha = new BcSecurity\CaptchaProvider( new BcSecurity\IpResolver() );
 $bc_captcha->register();
 
 ( new BcSecurity\BruteForce( new BcSecurity\IpResolver(), $bc_captcha ) )->register();

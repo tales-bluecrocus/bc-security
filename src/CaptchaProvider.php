@@ -13,6 +13,42 @@ namespace BcSecurity;
 class CaptchaProvider {
 
 	/**
+	 * Transient holding the most recent CAPTCHA configuration fault.
+	 */
+	const ERROR_TRANSIENT = 'bc_captcha_last_error';
+
+	/**
+	 * Provider error codes that indicate a configuration or infrastructure fault
+	 * on our side rather than a verdict about the visitor.
+	 *
+	 * A visitor cannot provoke any of these once is_plausible_token() has run:
+	 * the secret key and the request shape are entirely under the site's control.
+	 *
+	 * @var array
+	 */
+	private static $config_error_codes = array(
+		'missing-input-secret',
+		'invalid-input-secret',
+		'invalid-parsed-secret',
+		'invalid-keys',
+		'invalid-widget-id',
+		'bad-request',
+		'internal-error',
+	);
+
+	/**
+	 * @var IpResolver|null
+	 */
+	private $ip_resolver;
+
+	/**
+	 * @param IpResolver|null $ip_resolver Optional IP detection dependency.
+	 */
+	public function __construct( ?IpResolver $ip_resolver = null ) {
+		$this->ip_resolver = $ip_resolver;
+	}
+
+	/**
 	 * Get CAPTCHA settings with defaults.
 	 *
 	 * @return array Settings array.
@@ -24,6 +60,7 @@ class CaptchaProvider {
 			'captcha_secret_key'      => '',
 			'captcha_score_threshold' => 0.5,
 			'captcha_on_login'        => false,
+			'captcha_on_lostpassword' => false,
 		);
 
 		$settings = get_option( 'bc_security_settings', array() );
@@ -61,6 +98,16 @@ class CaptchaProvider {
 	}
 
 	/**
+	 * Check if CAPTCHA is enabled for the lost-password form.
+	 *
+	 * @return bool
+	 */
+	public function is_lostpassword_enabled(): bool {
+		$settings = $this->get_settings();
+		return $this->is_enabled() && ! empty( $settings['captcha_on_lostpassword'] );
+	}
+
+	/**
 	 * Register WordPress hooks for CAPTCHA script loading.
 	 */
 	public function register(): void {
@@ -71,7 +118,10 @@ class CaptchaProvider {
 		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
 		add_action( 'wp_footer', array( $this, 'render_token_js' ) );
 
-		if ( $this->is_login_enabled() ) {
+		// Both toggles live on wp-login.php, so either one requires the scripts.
+		// Without this, enabling only the lost-password toggle would print no
+		// script, send no token, and block every password reset on the site.
+		if ( $this->is_login_enabled() || $this->is_lostpassword_enabled() ) {
 			add_action( 'login_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
 			add_action( 'login_footer', array( $this, 'render_token_js' ) );
 		}
@@ -345,6 +395,11 @@ class CaptchaProvider {
 	/**
 	 * Verify the CAPTCHA token from the current request.
 	 *
+	 * Fails open — with reason 'captcha_unavailable' — when the provider or our own
+	 * keys are at fault, and records the cause for the admin notice. Fails closed on
+	 * a genuine bot verdict: a missing token, an implausible one, or a rejection the
+	 * provider attributes to the submitted response.
+	 *
 	 * @return array Verification result with 'success' (bool), 'score' (float), and optionally 'reason' (string).
 	 */
 	public function verify(): array {
@@ -356,13 +411,25 @@ class CaptchaProvider {
 
 		$settings = $this->get_settings();
 
-		if ( empty( $settings['captcha_secret_key'] ) ) {
+		// A missing site key means enqueue_scripts() and render_token_js() both
+		// bailed, so no script was printed and no token can possibly exist —
+		// failing closed here would block every submission on the site. A missing
+		// secret key means there is nothing to verify against.
+		if ( empty( $settings['captcha_site_key'] ) || empty( $settings['captcha_secret_key'] ) ) {
 			return $pass;
 		}
 
 		$token = $this->get_token();
 		if ( empty( $token ) ) {
 			return array( 'success' => false, 'score' => 0.0, 'reason' => 'captcha_missing' );
+		}
+
+		// Reject implausible tokens locally so a bot cannot provoke a bad-request
+		// response, which is classified below as a configuration fault and fails
+		// open. If this check is ever loosened, bad-request must move to the
+		// fail-closed list.
+		if ( ! $this->is_plausible_token( $token ) ) {
+			return array( 'success' => false, 'score' => 0.0, 'reason' => 'captcha_failed' );
 		}
 
 		$provider = $settings['captcha_provider'];
@@ -396,6 +463,130 @@ class CaptchaProvider {
 	}
 
 	/**
+	 * Check that a token looks like something a CAPTCHA provider could have issued.
+	 *
+	 * @param string $token Submitted token.
+	 * @return bool
+	 */
+	private function is_plausible_token( string $token ): bool {
+		if ( strlen( $token ) > 4096 ) {
+			return false;
+		}
+
+		return (bool) preg_match( '/^[A-Za-z0-9_\-\.=~]+$/', $token );
+	}
+
+	/**
+	 * Get the client IP for the provider's optional remoteip parameter.
+	 *
+	 * Uses IpResolver so the value matches what the rest of the plugin logs —
+	 * REMOTE_ADDR is the CDN edge on every Cloudflare-fronted site. The parameter
+	 * is advisory: IpResolver trusts X-Forwarded-For, so a spoofed header only
+	 * degrades the provider's own risk signal and cannot bypass verification.
+	 *
+	 * @return string Client IP, or an empty string when unresolved.
+	 */
+	private function get_remote_ip(): string {
+		$resolver = $this->ip_resolver ? $this->ip_resolver : new IpResolver();
+		$ip       = $resolver->get_client_ip();
+
+		return $ip === '0.0.0.0' ? '' : $ip;
+	}
+
+	/**
+	 * Decode and classify a siteverify response.
+	 *
+	 * Configuration and infrastructure faults fail OPEN and are recorded for the
+	 * admin notice — they are our problem, not the visitor's, and blocking real
+	 * people because a key expired is worse than briefly losing the check.
+	 * Genuine bot verdicts fail CLOSED.
+	 *
+	 * @param array|\WP_Error $response Raw wp_remote_post() result.
+	 * @param string          $provider Provider slug, for the error record.
+	 * @return array Array with 'body' (decoded body, or null) and 'result'
+	 *               (a verify() result to return as-is, or null to continue).
+	 */
+	private function parse_siteverify( $response, string $provider ): array {
+		$open = array(
+			'body'   => null,
+			'result' => array( 'success' => true, 'score' => 1.0, 'reason' => 'captcha_unavailable' ),
+		);
+
+		if ( is_wp_error( $response ) ) {
+			$this->record_error( $provider, array( 'request-failed' ), $response->get_error_message() );
+			return $open;
+		}
+
+		$status = (int) wp_remote_retrieve_response_code( $response );
+
+		if ( $status < 200 || $status > 299 ) {
+			$this->record_error( $provider, array( 'http-' . $status ), '' );
+			return $open;
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		if ( ! is_array( $body ) ) {
+			$this->record_error( $provider, array( 'unparseable-response' ), '' );
+			return $open;
+		}
+
+		if ( ! empty( $body['success'] ) ) {
+			return array( 'body' => $body, 'result' => null );
+		}
+
+		$codes = isset( $body['error-codes'] ) && is_array( $body['error-codes'] )
+			? array_map( 'strval', $body['error-codes'] )
+			: array();
+
+		// An empty error-codes array is undocumented for both providers, so treat
+		// it as a fault rather than silently blocking real visitors.
+		if ( empty( $codes ) || array_intersect( $codes, self::$config_error_codes ) ) {
+			$this->record_error( $provider, empty( $codes ) ? array( 'no-error-code' ) : $codes, '' );
+			return $open;
+		}
+
+		// invalid-input-response, missing-input-response, timeout-or-duplicate.
+		return array(
+			'body'   => null,
+			'result' => array( 'success' => false, 'score' => 0.0, 'reason' => 'captcha_failed' ),
+		);
+	}
+
+	/**
+	 * Record the most recent CAPTCHA configuration fault for the admin notice.
+	 *
+	 * A transient rather than a log row: this is a site-configuration problem, not
+	 * a submission, and LogsTable renders any non-blocked status as a green "Sent"
+	 * badge, so a fault would display as a successful send. Rewritten only when the
+	 * payload changes, so a spam flood against a broken key cannot turn into one
+	 * database write per request.
+	 *
+	 * @param string $provider Provider slug.
+	 * @param array  $codes    Provider error codes, or a synthetic code.
+	 * @param string $detail   Optional extra detail (WP_Error message).
+	 */
+	private function record_error( string $provider, array $codes, string $detail ): void {
+		$record = array(
+			'provider' => $provider,
+			'codes'    => array_values( $codes ),
+			'detail'   => $detail,
+			'time'     => time(),
+		);
+
+		$existing = get_transient( self::ERROR_TRANSIENT );
+
+		if ( is_array( $existing )
+			&& isset( $existing['provider'], $existing['codes'] )
+			&& $existing['provider'] === $record['provider']
+			&& $existing['codes'] === $record['codes'] ) {
+			return;
+		}
+
+		set_transient( self::ERROR_TRANSIENT, $record, 6 * HOUR_IN_SECONDS );
+	}
+
+	/**
 	 * Verify a token against the Google reCAPTCHA v3 API.
 	 *
 	 * @param string $token   CAPTCHA token from client.
@@ -407,23 +598,18 @@ class CaptchaProvider {
 			'body' => array(
 				'secret'   => $settings['captcha_secret_key'],
 				'response' => $token,
-				'remoteip' => isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '',
+				'remoteip' => $this->get_remote_ip(),
 			),
 			'timeout' => 5,
 		) );
 
-		// Fail-open on API error.
-		if ( is_wp_error( $response ) ) {
-			return array( 'success' => true, 'score' => 1.0 );
+		$parsed = $this->parse_siteverify( $response, 'recaptcha_v3' );
+
+		if ( $parsed['result'] !== null ) {
+			return $parsed['result'];
 		}
 
-		$body = json_decode( wp_remote_retrieve_body( $response ), true );
-
-		if ( empty( $body ) || empty( $body['success'] ) ) {
-			return array( 'success' => false, 'score' => 0.0, 'reason' => 'captcha_failed' );
-		}
-
-		$score     = isset( $body['score'] ) ? (float) $body['score'] : 0.0;
+		$score     = isset( $parsed['body']['score'] ) ? (float) $parsed['body']['score'] : 0.0;
 		$threshold = (float) $settings['captcha_score_threshold'];
 
 		if ( $score < $threshold ) {
@@ -445,20 +631,15 @@ class CaptchaProvider {
 			'body' => array(
 				'secret'   => $settings['captcha_secret_key'],
 				'response' => $token,
-				'remoteip' => isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '',
+				'remoteip' => $this->get_remote_ip(),
 			),
 			'timeout' => 5,
 		) );
 
-		// Fail-open on API error.
-		if ( is_wp_error( $response ) ) {
-			return array( 'success' => true, 'score' => 1.0 );
-		}
+		$parsed = $this->parse_siteverify( $response, 'turnstile' );
 
-		$body = json_decode( wp_remote_retrieve_body( $response ), true );
-
-		if ( empty( $body ) || empty( $body['success'] ) ) {
-			return array( 'success' => false, 'score' => 0.0, 'reason' => 'captcha_failed' );
+		if ( $parsed['result'] !== null ) {
+			return $parsed['result'];
 		}
 
 		return array( 'success' => true, 'score' => 1.0 );
