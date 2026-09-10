@@ -158,6 +158,14 @@ class AdminPage {
 			'bc_security_captcha_section'
 		);
 
+		add_settings_field(
+			'captcha_on_lostpassword',
+			'Protect Lost Password Form',
+			array( $this, 'render_captcha_lostpassword_field' ),
+			'bc-security',
+			'bc_security_captcha_section'
+		);
+
 		add_settings_section(
 			'bc_security_pwreset_section',
 			'Password Reset Protection',
@@ -218,10 +226,14 @@ class AdminPage {
 		$threshold = isset( $input['captcha_score_threshold'] ) ? floatval( $input['captcha_score_threshold'] ) : 0.5;
 		$sanitized['captcha_score_threshold'] = max( 0.1, min( 0.9, $threshold ) );
 
-		$sanitized['captcha_on_login'] = ! empty( $input['captcha_on_login'] );
+		$sanitized['captcha_on_login']        = ! empty( $input['captcha_on_login'] );
+		$sanitized['captcha_on_lostpassword'] = ! empty( $input['captcha_on_lostpassword'] );
 
 		$sanitized['pwreset_protection']       = ! empty( $input['pwreset_protection'] );
 		$sanitized['pwreset_generic_response'] = ! empty( $input['pwreset_generic_response'] );
+
+		// Any recorded CAPTCHA fault refers to the configuration being replaced.
+		delete_transient( CaptchaProvider::ERROR_TRANSIENT );
 
 		return $sanitized;
 	}
@@ -337,6 +349,21 @@ class AdminPage {
 	}
 
 	/**
+	 * Render the CAPTCHA lost-password protection checkbox.
+	 */
+	public function render_captcha_lostpassword_field(): void {
+		$settings = $this->get_captcha_settings();
+		$checked  = ! empty( $settings['captcha_on_lostpassword'] ) ? 'checked' : '';
+		?>
+		<label>
+			<input type="checkbox" name="bc_security_settings[captcha_on_lostpassword]" value="1" <?php echo $checked; ?> class="bc-captcha-field" />
+			Enable CAPTCHA on the "Lost your password?" form
+		</label>
+		<p class="description">Verifies reset requests before an email is generated. Safer to enable than login protection: if CAPTCHA misfires here, password recovery is blocked, whereas on the login form nobody can sign in at all.</p>
+		<?php
+	}
+
+	/**
 	 * Render the password reset section description.
 	 */
 	public function render_pwreset_section_description(): void {
@@ -399,6 +426,7 @@ class AdminPage {
 			'captcha_secret_key'      => '',
 			'captcha_score_threshold' => 0.5,
 			'captcha_on_login'        => false,
+			'captcha_on_lostpassword' => false,
 		) );
 	}
 

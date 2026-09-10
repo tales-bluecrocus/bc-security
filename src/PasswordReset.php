@@ -40,12 +40,19 @@ class PasswordReset {
 	private $in_reset_request = false;
 
 	/**
-	 * @param IpResolver      $ip_resolver IP detection dependency.
-	 * @param FormLogger|null $logger      Optional logger for the audit trail.
+	 * @var CaptchaProvider|null
 	 */
-	public function __construct( IpResolver $ip_resolver, ?FormLogger $logger = null ) {
+	private $captcha;
+
+	/**
+	 * @param IpResolver           $ip_resolver IP detection dependency.
+	 * @param FormLogger|null      $logger      Optional logger for the audit trail.
+	 * @param CaptchaProvider|null $captcha     Optional CAPTCHA provider.
+	 */
+	public function __construct( IpResolver $ip_resolver, ?FormLogger $logger = null, ?CaptchaProvider $captcha = null ) {
 		$this->ip_resolver = $ip_resolver;
 		$this->logger      = $logger;
+		$this->captcha     = $captcha;
 	}
 
 	/**
@@ -107,26 +114,73 @@ class PasswordReset {
 	}
 
 	/**
-	 * Record the attempt and apply the per-account cooldown.
+	 * Verify the CAPTCHA, record the attempt, and apply the per-account cooldown.
 	 *
-	 * @param \WP_Error      $errors    Error collector (unused; we exit instead).
+	 * @param \WP_Error      $errors    Error collector — populated on CAPTCHA failure.
 	 * @param \WP_User|false $user_data Resolved user, or false if no match.
 	 */
 	public function on_reset_request( $errors, $user_data ): void {
-		if ( ! $this->is_protection_enabled() || ! $this->is_web_request() ) {
+		// retrieve_password() is also reachable from WP-CLI and cron, where there is
+		// no token to verify and no browser to redirect.
+		if ( ! $this->is_web_request() ) {
 			return;
 		}
 
-		$this->in_reset_request = true;
+		$protection = $this->is_protection_enabled();
 
-		$this->record_attempt( $this->ip_resolver->get_client_ip() );
+		if ( $protection ) {
+			$this->in_reset_request = true;
+
+			// Counted before the CAPTCHA check on purpose: a bot that never sends a
+			// token must still burn its per-IP budget and hit the 429.
+			$this->record_attempt( $this->ip_resolver->get_client_ip() );
+		}
+
+		// A failed CAPTCHA must not fall through to the cooldown check, which exits
+		// with a redirect that would swallow the error the visitor needs to see.
+		if ( ! $this->check_captcha( $errors ) ) {
+			return;
+		}
 
 		// Silent by design: a visible "too many requests" here would confirm the
 		// account exists, reopening the oracle that genericize_errors() closes.
-		if ( $user_data instanceof \WP_User && $this->is_account_cooling_down( $user_data->ID ) ) {
+		if ( $protection && $user_data instanceof \WP_User && $this->is_account_cooling_down( $user_data->ID ) ) {
 			$this->log_event( 'blocked', 'pwreset_cooldown' );
 			$this->redirect_to_confirmation();
 		}
+	}
+
+	/**
+	 * Verify the CAPTCHA token on the lost-password form.
+	 *
+	 * Gated on is_lostpassword_enabled() rather than is_protection_enabled(), so
+	 * turning off the rate limiter does not silently turn off the CAPTCHA too.
+	 *
+	 * @param \WP_Error $errors Error collector passed through lostpassword_post.
+	 * @return bool True to continue processing, false if the request was rejected.
+	 */
+	private function check_captcha( $errors ): bool {
+		if ( ! $this->captcha || ! $this->captcha->is_lostpassword_enabled() ) {
+			return true;
+		}
+
+		$result = $this->captcha->verify();
+
+		if ( ! empty( $result['success'] ) ) {
+			return true;
+		}
+
+		$this->log_event( 'blocked', isset( $result['reason'] ) ? $result['reason'] : 'captcha_failed' );
+
+		if ( is_wp_error( $errors ) ) {
+			// Load-bearing. Core adds invalid_email BEFORE this hook fires. Left in
+			// place it renders alongside the CAPTCHA error, handing the account
+			// enumeration oracle back to any bot that simply omits the token.
+			$errors->remove( 'invalid_email' );
+			$errors->add( 'captcha_failed', '<strong>Error:</strong> Verification failed. Please try again.' );
+		}
+
+		return false;
 	}
 
 	/**

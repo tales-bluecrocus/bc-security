@@ -53,7 +53,7 @@ $bc_logger = new BcSecurity\FormLogger();
 ( new BcSecurity\SpamFilter( new BcSecurity\IpResolver(), $bc_logger, $bc_captcha ) )->register();
 
 // Password reset abuse protection.
-( new BcSecurity\PasswordReset( new BcSecurity\IpResolver(), $bc_logger ) )->register();
+( new BcSecurity\PasswordReset( new BcSecurity\IpResolver(), $bc_logger, $bc_captcha ) )->register();
 
 // Admin UI.
 if ( is_admin() ) {
