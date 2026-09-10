@@ -545,6 +545,18 @@ class CaptchaProvider {
 	/**
 	 * Check that a token looks like something a CAPTCHA provider could have issued.
 	 *
+	 * Deliberately permissive: it covers URL-safe base64 (reCAPTCHA), standard
+	 * base64 including + and /, dotted tokens (Turnstile) and padding. The only
+	 * job here is to keep obviously hostile input away from the siteverify call so
+	 * a visitor cannot provoke a bad-request, which is classified as a
+	 * configuration fault and fails open. Rejecting a token shape some provider
+	 * legitimately issues would block real people, which is far worse than the
+	 * narrow bypass this guards against — so when in doubt, widen it.
+	 *
+	 * If this is ever narrowed, that is fine. If the character class is widened to
+	 * include whitespace or control characters, move 'bad-request' to the
+	 * fail-closed list in $config_error_codes.
+	 *
 	 * @param string $token Submitted token.
 	 * @return bool
 	 */
@@ -553,7 +565,7 @@ class CaptchaProvider {
 			return false;
 		}
 
-		return (bool) preg_match( '/^[A-Za-z0-9_\-\.=~]+$/', $token );
+		return (bool) preg_match( '/^[A-Za-z0-9_\-\.=~+\/]+$/', $token );
 	}
 
 	/**
