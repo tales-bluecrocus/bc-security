@@ -126,6 +126,13 @@ class PasswordReset {
 			return;
 		}
 
+		// An administrator's "Send password reset" (Users screen, single or bulk)
+		// runs through retrieve_password() too. It is not abuse: don't burn the
+		// admin's IP budget, and never redirect mid-request out of the dashboard.
+		if ( $this->is_admin_initiated() ) {
+			return;
+		}
+
 		$protection = $this->is_protection_enabled();
 
 		if ( $protection ) {
@@ -195,7 +202,7 @@ class PasswordReset {
 	 * @return \WP_Error Unmodified errors, or exits with a fake success.
 	 */
 	public function genericize_errors( $errors, $user_data ) {
-		if ( ! $this->is_generic_response_enabled() || ! $this->is_web_request() ) {
+		if ( ! $this->is_generic_response_enabled() || ! $this->is_web_request() || $this->is_admin_initiated() ) {
 			return $errors;
 		}
 
@@ -293,6 +300,19 @@ class PasswordReset {
 		}
 
 		return ! wp_doing_cron();
+	}
+
+	/**
+	 * Check whether an administrator triggered this reset from the dashboard.
+	 *
+	 * Core's "Send password reset" (Users screen, single via admin-ajax and bulk
+	 * via users.php) calls retrieve_password(), which fires lostpassword_post. A
+	 * bot cannot satisfy this: it needs a logged-in user who can edit users.
+	 *
+	 * @return bool
+	 */
+	private function is_admin_initiated(): bool {
+		return is_admin() && current_user_can( 'edit_users' );
 	}
 
 	/**
