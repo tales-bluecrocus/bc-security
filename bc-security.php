@@ -40,8 +40,17 @@ require __DIR__ . '/vendor/autoload.php';
 // Database migration (lightweight version check).
 ( new BcSecurity\Database() )->maybe_create_tables();
 
+// One-time move to the per-pair CAPTCHA settings of 2.4.
+( new BcSecurity\CaptchaMigration() )->maybe_migrate();
+
 // Security features.
-$bc_captcha = new BcSecurity\CaptchaProvider( new BcSecurity\IpResolver() );
+$bc_elementor = new BcSecurity\ElementorCaptcha();
+$bc_captcha   = new BcSecurity\CaptchaProvider(
+	new BcSecurity\IpResolver(),
+	new BcSecurity\CaptchaVerifiedKeys(),
+	new BcSecurity\CaptchaHealth(),
+	$bc_elementor
+);
 $bc_captcha->register();
 
 ( new BcSecurity\BruteForce( new BcSecurity\IpResolver(), $bc_captcha ) )->register();
@@ -50,14 +59,15 @@ $bc_captcha->register();
 
 // Spam protection.
 $bc_logger = new BcSecurity\FormLogger();
-( new BcSecurity\SpamFilter( new BcSecurity\IpResolver(), $bc_logger, $bc_captcha ) )->register();
+( new BcSecurity\SpamFilter( new BcSecurity\IpResolver(), $bc_logger, $bc_captcha, $bc_elementor ) )->register();
 
 // Password reset abuse protection.
 ( new BcSecurity\PasswordReset( new BcSecurity\IpResolver(), $bc_logger, $bc_captcha ) )->register();
 
 // Admin UI.
 if ( is_admin() ) {
-	( new BcSecurity\AdminPage( $bc_logger, $bc_captcha ) )->register();
+	( new BcSecurity\AdminPage( $bc_logger, $bc_captcha, $bc_elementor ) )->register();
+	( new BcSecurity\CaptchaKeyTest( $bc_captcha ) )->register();
 }
 
 // Run migration on plugin activation.

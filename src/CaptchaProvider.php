@@ -1,9 +1,22 @@
 <?php
 /**
- * CAPTCHA provider — reCAPTCHA v3 and Cloudflare Turnstile integration.
+ * CAPTCHA provider — Google reCAPTCHA (v2 checkbox, v3) and Cloudflare Turnstile.
  *
- * Abstracts CAPTCHA verification behind a unified interface.
- * When disabled (default), all methods are no-ops and verify() returns success.
+ * Nothing here is enforced unless the key pair involved has passed Test Keys on
+ * this site. Until then a surface is inactive and the plugin's other layers keep
+ * working: rate limits for login and password reset, the honeypot and keyword
+ * filter for contact forms.
+ *
+ * Why the gate exists: Google answers "invalid-input-response" for a forged token
+ * and for a genuine token checked against the wrong secret alike, and a wrong site
+ * key simply produces no token. A bad or retired reCAPTCHA key is therefore
+ * indistinguishable from a bot on any single request. The one reliable moment to
+ * catch it is before it is switched on, with a real token from a real browser.
+ *
+ * Surfaces:
+ *   - Login: the main checkbox, only for IPs over the brute-force limit (BruteForce).
+ *   - Lost password: the main checkbox on wp-login.php (PasswordReset).
+ *   - Contact forms: off, the main checkbox, or invisible reCAPTCHA v3 (here).
  *
  * @package BcSecurity
  */
@@ -18,11 +31,31 @@ class CaptchaProvider {
 	const ERROR_TRANSIENT = 'bc_captcha_last_error';
 
 	/**
+	 * Field our scripts copy the provider token into. The server reads only this,
+	 * so other plugins' g-recaptcha-response or cf-turnstile-response fields can
+	 * never be mistaken for ours.
+	 */
+	const TOKEN_FIELD = 'bc_captcha_token';
+
+	/**
+	 * Field our scripts use to report why no token could be obtained.
+	 */
+	const ERROR_FIELD = 'bc_captcha_error';
+
+	/**
+	 * Codes a visitor's browser may report when the provider library loaded but no
+	 * token could be obtained. A library that never loaded at all (ad blocker,
+	 * network) reports nothing: that says nothing about our keys.
+	 */
+	const CLIENT_ERROR_CODES = array( 'v3-timeout', 'v3-rejected', 'v3-no-execute', 'widget-error', 'widget-render-failed' );
+
+	/**
 	 * Provider error codes that indicate a configuration or infrastructure fault
 	 * on our side rather than a verdict about the visitor.
 	 *
-	 * A visitor cannot provoke any of these once is_plausible_token() has run:
-	 * the secret key and the request shape are entirely under the site's control.
+	 * Only Cloudflare actually reports a bad secret; Google never does (see the
+	 * class docblock). A visitor cannot provoke any of these once
+	 * is_plausible_token() has run.
 	 *
 	 * @var array
 	 */
@@ -37,120 +70,205 @@ class CaptchaProvider {
 	);
 
 	/**
-	 * @var IpResolver|null
+	 * siteverify endpoints.
+	 *
+	 * @var array
+	 */
+	private static $endpoints = array(
+		'recaptcha_v2' => 'https://www.google.com/recaptcha/api/siteverify',
+		'recaptcha_v3' => 'https://www.google.com/recaptcha/api/siteverify',
+		'turnstile'    => 'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+	);
+
+	/**
+	 * @var IpResolver
 	 */
 	private $ip_resolver;
 
 	/**
-	 * @param IpResolver|null $ip_resolver Optional IP detection dependency.
+	 * @var CaptchaVerifiedKeys
 	 */
-	public function __construct( ?IpResolver $ip_resolver = null ) {
-		$this->ip_resolver = $ip_resolver;
-	}
+	private $verified;
 
 	/**
-	 * Get CAPTCHA settings with defaults.
+	 * @var CaptchaHealth
+	 */
+	private $health;
+
+	/**
+	 * @var ElementorCaptcha
+	 */
+	private $elementor;
+
+	/**
+	 * Whether the widget script has been printed on this page.
 	 *
-	 * @return array Settings array.
+	 * @var bool
 	 */
-	private function get_settings(): array {
-		$defaults = array(
-			'captcha_provider'        => 'off',
-			'captcha_site_key'        => '',
-			'captcha_secret_key'      => '',
-			'captcha_score_threshold' => 0.5,
-			'captcha_on_login'        => false,
-			'captcha_on_lostpassword' => false,
-		);
-
-		$settings = get_option( 'bc_security_settings', array() );
-
-		return wp_parse_args( $settings, $defaults );
-	}
+	private $widget_js_printed = false;
 
 	/**
-	 * Get the active CAPTCHA provider.
+	 * @param IpResolver|null          $ip_resolver IP detection.
+	 * @param CaptchaVerifiedKeys|null $verified    Verified key pairs.
+	 * @param CaptchaHealth|null       $health      Verification health tracking.
+	 * @param ElementorCaptcha|null    $elementor   Elementor reCAPTCHA detection.
+	 */
+	public function __construct( ?IpResolver $ip_resolver = null, ?CaptchaVerifiedKeys $verified = null, ?CaptchaHealth $health = null, ?ElementorCaptcha $elementor = null ) {
+		$this->ip_resolver = $ip_resolver ? $ip_resolver : new IpResolver();
+		$this->verified    = $verified ? $verified : new CaptchaVerifiedKeys();
+		$this->health      = $health ? $health : new CaptchaHealth();
+		$this->elementor   = $elementor ? $elementor : new ElementorCaptcha();
+	}
+
+	/* =====================================================================
+	 * State
+	 * ===================================================================== */
+
+	/**
+	 * Fingerprint of the saved keys for a pair.
 	 *
-	 * @return string 'recaptcha_v3', 'turnstile', or 'off'.
+	 * @param string $pair 'main' or 'v3'.
+	 * @return string
 	 */
-	public function get_provider(): string {
-		$settings = $this->get_settings();
-		return $settings['captcha_provider'];
+	public function pair_fingerprint( string $pair ): string {
+		$keys = CaptchaSettings::pair( $pair );
+
+		return CaptchaSettings::fingerprint( $pair, $keys['provider'], $keys['site'], $keys['secret'] );
 	}
 
 	/**
-	 * Check if CAPTCHA is enabled.
+	 * Status of the saved keys for a pair.
+	 *
+	 * @param string $pair 'main' or 'v3'.
+	 * @return string 'no-keys', 'untested' or 'active'.
+	 */
+	public function pair_status( string $pair ): string {
+		$keys = CaptchaSettings::pair( $pair );
+
+		if ( '' === $keys['site'] || '' === $keys['secret'] ) {
+			return 'no-keys';
+		}
+
+		return $this->verified->is_verified( $this->pair_fingerprint( $pair ) ) ? 'active' : 'untested';
+	}
+
+	/**
+	 * Check whether a pair's saved keys have passed Test Keys on this host.
+	 *
+	 * @param string $pair 'main' or 'v3'.
+	 * @return bool
+	 */
+	public function is_pair_active( string $pair ): bool {
+		return 'active' === $this->pair_status( $pair );
+	}
+
+	/**
+	 * When the saved keys for a pair passed Test Keys.
+	 *
+	 * @param string $pair 'main' or 'v3'.
+	 * @return int Unix time, or 0.
+	 */
+	public function verified_time( string $pair ): int {
+		return $this->verified->time_for( $this->pair_fingerprint( $pair ) );
+	}
+
+	/**
+	 * The main pair's provider.
+	 *
+	 * @return string 'recaptcha_v2' or 'turnstile'.
+	 */
+	public function main_provider(): string {
+		$keys = CaptchaSettings::pair( 'main' );
+
+		return $keys['provider'];
+	}
+
+	/**
+	 * Check whether flagged IPs get a checkbox instead of a lockout on wp-login.php.
 	 *
 	 * @return bool
 	 */
-	public function is_enabled(): bool {
-		return $this->get_provider() !== 'off';
+	public function is_login_challenge_active(): bool {
+		$settings = CaptchaSettings::get();
+
+		return ! empty( $settings['captcha_login_challenge'] ) && $this->is_pair_active( 'main' );
 	}
 
 	/**
-	 * Check if CAPTCHA is enabled for the login page.
+	 * Check whether the lost-password form requires the checkbox.
 	 *
 	 * @return bool
 	 */
-	public function is_login_enabled(): bool {
-		$settings = $this->get_settings();
-		return $this->is_enabled() && ! empty( $settings['captcha_on_login'] );
+	public function is_reset_active(): bool {
+		$settings = CaptchaSettings::get();
+
+		return ! empty( $settings['captcha_on_lostpassword'] ) && $this->is_pair_active( 'main' );
 	}
 
 	/**
-	 * Check if CAPTCHA is enabled for the lost-password form.
+	 * The contact-form mode actually in force.
 	 *
-	 * @return bool
+	 * @return string 'off', 'checkbox' or 'v3' — 'off' unless the pair it needs is active.
 	 */
-	public function is_lostpassword_enabled(): bool {
-		$settings = $this->get_settings();
-		return $this->is_enabled() && ! empty( $settings['captcha_on_lostpassword'] );
+	public function forms_mode(): string {
+		$settings = CaptchaSettings::get();
+		$mode     = (string) $settings['captcha_forms_mode'];
+
+		if ( 'checkbox' === $mode ) {
+			return $this->is_pair_active( 'main' ) ? 'checkbox' : 'off';
+		}
+
+		if ( 'v3' === $mode ) {
+			return $this->is_pair_active( 'v3' ) ? 'v3' : 'off';
+		}
+
+		return 'off';
 	}
 
 	/**
-	 * Register WordPress hooks for CAPTCHA script loading.
+	 * The failure streak to warn about, if a pair's keys look broken.
+	 *
+	 * @param string $pair 'main' or 'v3'.
+	 * @return array|null
+	 */
+	public function health_warning( string $pair ): ?array {
+		if ( ! $this->is_pair_active( $pair ) ) {
+			return null;
+		}
+
+		return $this->health->warning( $pair, $this->pair_fingerprint( $pair ) );
+	}
+
+	/* =====================================================================
+	 * Contact forms
+	 * ===================================================================== */
+
+	/**
+	 * Register front-end hooks. Only when a contact-form mode is actually in force:
+	 * a site with CAPTCHA off loads no provider script at all.
 	 */
 	public function register(): void {
-		if ( ! $this->is_enabled() ) {
+		if ( 'off' === $this->forms_mode() ) {
 			return;
 		}
 
-		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
-		add_action( 'wp_footer', array( $this, 'render_token_js' ) );
-
-		// Both toggles live on wp-login.php, so either one requires the scripts.
-		// Without this, enabling only the lost-password toggle would print no
-		// script, send no token, and block every password reset on the site.
-		if ( $this->is_login_enabled() || $this->is_lostpassword_enabled() ) {
-			add_action( 'login_enqueue_scripts', array( $this, 'enqueue_scripts' ) );
-			add_action( 'login_footer', array( $this, 'render_token_js' ) );
-		}
+		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_forms_scripts' ) );
+		add_action( 'wp_footer', array( $this, 'render_forms_js' ) );
 	}
 
 	/**
-	 * Enqueue the CAPTCHA provider's JavaScript.
+	 * Enqueue the provider script for contact forms.
 	 */
-	public function enqueue_scripts(): void {
-		$settings = $this->get_settings();
-		$provider = $settings['captcha_provider'];
-		$site_key = $settings['captcha_site_key'];
+	public function enqueue_forms_scripts(): void {
+		$mode = $this->forms_mode();
 
-		if ( empty( $site_key ) ) {
-			return;
-		}
-
-		if ( $provider === 'recaptcha_v3' ) {
+		if ( 'checkbox' === $mode ) {
+			wp_enqueue_script( 'bc-captcha-widget', $this->widget_script_url( $this->main_provider() ), array(), null, true );
+		} elseif ( 'v3' === $mode ) {
+			$keys = CaptchaSettings::pair( 'v3' );
 			wp_enqueue_script(
-				'bc-recaptcha',
-				'https://www.google.com/recaptcha/api.js?render=' . urlencode( $site_key ),
-				array(),
-				null,
-				true
-			);
-		} elseif ( $provider === 'turnstile' ) {
-			wp_enqueue_script(
-				'bc-turnstile',
-				'https://challenges.cloudflare.com/turnstile/v0/api.js',
+				'bc-recaptcha-v3',
+				'https://www.google.com/recaptcha/api.js?render=' . rawurlencode( $keys['site'] ),
 				array(),
 				null,
 				true
@@ -159,56 +277,338 @@ class CaptchaProvider {
 	}
 
 	/**
-	 * Render the inline JavaScript for token injection.
+	 * Print the contact-form script. Runs at wp_footer priority 10, before footer
+	 * scripts print at 20, so the provider's onload callback already exists.
 	 */
-	public function render_token_js(): void {
-		$settings = $this->get_settings();
-		$provider = $settings['captcha_provider'];
-		$site_key = $settings['captcha_site_key'];
+	public function render_forms_js(): void {
+		$mode = $this->forms_mode();
 
-		if ( empty( $site_key ) ) {
-			return;
-		}
-
-		if ( $provider === 'recaptcha_v3' ) {
-			$this->render_recaptcha_js( $site_key );
-		} elseif ( $provider === 'turnstile' ) {
-			$this->render_turnstile_js( $site_key );
+		if ( 'checkbox' === $mode ) {
+			$this->print_widget_js( 'forms' );
+		} elseif ( 'v3' === $mode ) {
+			$keys = CaptchaSettings::pair( 'v3' );
+			$this->render_v3_js( $keys['site'] );
 		}
 	}
 
+	/* =====================================================================
+	 * The visible checkbox (login escape hatch, lost-password form, forms)
+	 * ===================================================================== */
+
 	/**
-	 * Render reCAPTCHA v3 token injection script.
-	 *
-	 * Interception is conditional: the form is only held back when the library is
-	 * actually usable, and any timeout or rejection releases it. A form that cannot
-	 * obtain a token submits without one and is rejected server-side as
-	 * captcha_missing, which is visible in the logs and recoverable by retrying.
-	 * A form frozen by an unresolved promise is neither.
-	 *
-	 * The token is single-use: it is cleared after the replay dispatch so that a
-	 * second submission of an AJAX form obtains a fresh one instead of replaying
-	 * the old token and being rejected as timeout-or-duplicate.
-	 *
-	 * @param string $site_key reCAPTCHA site key.
+	 * Enqueue the main provider's script on wp-login.php.
 	 */
-	private function render_recaptcha_js( string $site_key ): void {
+	public function enqueue_widget_login(): void {
+		wp_enqueue_script( 'bc-captcha-widget', $this->widget_script_url( $this->main_provider() ), array(), null, true );
+
+		// The login form is 272px wide inside; both widgets are about 300px.
+		wp_add_inline_style( 'login', '#login{width:352px;}' );
+	}
+
+	/**
+	 * Print the widget container inside a wp-login.php form.
+	 */
+	public function print_widget_container(): void {
+		echo '<div class="bc-captcha-wrap" style="margin:0 0 16px;">'
+			. '<div class="bc-captcha-widget"></div>'
+			. '<input type="hidden" name="' . esc_attr( self::TOKEN_FIELD ) . '" value="" />'
+			. '<input type="hidden" name="' . esc_attr( self::ERROR_FIELD ) . '" value="" />'
+			. '</div>';
+	}
+
+	/**
+	 * Print the shared checkbox script once per page.
+	 *
+	 * @param string $context 'login', 'reset' or 'forms'.
+	 */
+	public function print_widget_js( string $context ): void {
+		if ( $this->widget_js_printed ) {
+			return;
+		}
+
+		$keys = CaptchaSettings::pair( 'main' );
+
+		if ( '' === $keys['site'] ) {
+			return;
+		}
+
+		$this->widget_js_printed = true;
+
+		$config = array(
+			'provider' => $keys['provider'],
+			'siteKey'  => $keys['site'],
+			'context'  => $context,
+			'token'    => self::TOKEN_FIELD,
+			'error'    => self::ERROR_FIELD,
+			'skip'     => $this->elementor->client_skip_config(),
+			'msg'      => array(
+				'required' => 'Please complete the security check first.',
+			),
+		);
+		?>
+		<script>
+		(function () {
+			var cfg = <?php echo wp_json_encode( $config ); ?>;
+			var ready = false;
+			var scheduled = false;
+
+			function lib() {
+				if (cfg.provider === 'turnstile') {
+					return (typeof turnstile !== 'undefined' && turnstile && typeof turnstile.render === 'function') ? turnstile : null;
+				}
+				return (typeof grecaptcha !== 'undefined' && grecaptcha && typeof grecaptcha.render === 'function') ? grecaptcha : null;
+			}
+
+			function field(form, name) {
+				var input = form.querySelector('input[name="' + name + '"]');
+				if (!input) {
+					input = document.createElement('input');
+					input.type = 'hidden';
+					input.name = name;
+					form.appendChild(input);
+				}
+				return input;
+			}
+
+			function note(form, text) {
+				var wrap = form.bcWidgetHost ? form.bcWidgetHost.parentNode : null;
+				if (!wrap) return;
+				var p = wrap.querySelector('.bc-captcha-note');
+				if (!text) {
+					if (p) p.parentNode.removeChild(p);
+					return;
+				}
+				if (!p) {
+					p = document.createElement('p');
+					p.className = 'bc-captcha-note';
+					p.setAttribute('role', 'alert');
+					p.style.cssText = 'margin:6px 0 0;color:#d63638;font-size:13px;';
+					wrap.appendChild(p);
+				}
+				p.textContent = text;
+			}
+
+			// Elementor forms carrying their own configured reCAPTCHA are left to
+			// Elementor. Mirrors the server-side step-back exactly.
+			function hasOwnCaptcha(form) {
+				var own = form.querySelector('.elementor-g-recaptcha');
+				if (!own) return false;
+				return own.getAttribute('data-type') === 'v3' ? !!cfg.skip.v3 : !!cfg.skip.v2;
+			}
+
+			function last(form, selector) {
+				var found = form.querySelectorAll(selector);
+				return found.length ? found[found.length - 1] : null;
+			}
+
+			// Where the widget goes. wp-login.php forms carry a server-printed
+			// container; contact forms get one just before the submit row.
+			function host(form) {
+				var existing = form.querySelector('.bc-captcha-widget');
+				if (existing) return existing;
+				if (cfg.context !== 'forms') return null;
+
+				var anchor = null;
+				if (form.classList.contains('elementor-form')) {
+					anchor = last(form, '.elementor-field-type-submit');
+				} else if (form.classList.contains('wpcf7-form')) {
+					var button = last(form, '.wpcf7-submit');
+					if (button) {
+						var row = button.closest('p');
+						anchor = (row && form.contains(row)) ? row : button;
+					}
+				} else if (form.closest('.gform_wrapper')) {
+					anchor = last(form, '.gform_page_footer') || last(form, '.gform_footer');
+				} else if (form.classList.contains('frm-show-form')) {
+					anchor = last(form, '.frm_submit');
+				}
+				if (!anchor || !anchor.parentNode) return null;
+
+				var wrap = document.createElement('div');
+				wrap.className = 'bc-captcha-wrap';
+				wrap.style.cssText = 'margin:0 0 12px;flex:0 0 100%;width:100%;max-width:100%;';
+				var widget = document.createElement('div');
+				widget.className = 'bc-captcha-widget';
+				wrap.appendChild(widget);
+				anchor.parentNode.insertBefore(wrap, anchor);
+				return widget;
+			}
+
+			function render(form) {
+				if (form.bcWidget !== undefined) return;
+				var api = lib();
+				if (!api) return;
+				var target = host(form);
+				if (!target) return;
+
+				var token = field(form, cfg.token);
+				var error = field(form, cfg.error);
+				form.bcWidgetHost = target;
+
+				try {
+					form.bcWidget = api.render(target, {
+						sitekey: cfg.siteKey,
+						callback: function (value) {
+							token.value = value || '';
+							error.value = '';
+							note(form, '');
+						},
+						'expired-callback': function () {
+							token.value = '';
+						},
+						'error-callback': function () {
+							token.value = '';
+							error.value = 'widget-error';
+						}
+					});
+				} catch (e) {
+					form.bcWidget = null;
+					error.value = 'widget-render-failed';
+				}
+			}
+
+			function scan() {
+				if (!ready || !lib()) return;
+				var selector = cfg.context === 'forms'
+					? 'form.elementor-form, form.wpcf7-form, .gform_wrapper form, form.frm-show-form'
+					: 'form';
+				var forms = document.querySelectorAll(selector);
+				for (var i = 0; i < forms.length; i++) {
+					if (cfg.context === 'forms' && hasOwnCaptcha(forms[i])) continue;
+					render(forms[i]);
+				}
+			}
+
+			function start() {
+				if (ready || !lib()) return;
+				ready = true;
+				scan();
+			}
+
+			window.bcWidgetOnload = start;
+			// Another plugin may already have loaded the library without our onload.
+			window.addEventListener('load', start);
+
+			// Popups, AJAX-loaded sections, and Gravity's re-render after an error.
+			if (cfg.context === 'forms' && window.MutationObserver) {
+				new MutationObserver(function () {
+					if (scheduled || !ready) return;
+					scheduled = true;
+					setTimeout(function () {
+						scheduled = false;
+						scan();
+					}, 300);
+				}).observe(document.documentElement, {childList: true, subtree: true});
+			}
+
+			// Capture phase, so this runs before any form plugin's own handler.
+			document.addEventListener('submit', function (e) {
+				var form = e.target;
+				if (!form || form.tagName !== 'FORM') return;
+				// Never rendered or failed to render: let it through, the server decides.
+				if (form.bcWidget === undefined || form.bcWidget === null) return;
+
+				// Gravity multi-page "Next"/"Previous" is not the final submission.
+				var target = form.querySelector('input[name^="gform_target_page_number_"]');
+				if (target && target.value && target.value !== '0') return;
+
+				var token = form.querySelector('input[name="' + cfg.token + '"]');
+				var error = form.querySelector('input[name="' + cfg.error + '"]');
+				if (token && !token.value && !(error && error.value)) {
+					e.preventDefault();
+					e.stopPropagation();
+					note(form, cfg.msg.required);
+					return;
+				}
+
+				// wp-login.php reloads the page; only AJAX forms need a fresh check.
+				if (cfg.context !== 'forms') return;
+
+				// Tokens are single-use: reset once this dispatch has finished and the
+				// form plugin has read the form data.
+				setTimeout(function () {
+					var api = lib();
+					try {
+						if (api && typeof api.reset === 'function') api.reset(form.bcWidget);
+					} catch (x) {}
+					if (token) token.value = '';
+				}, 0);
+			}, true);
+		})();
+		</script>
+		<?php
+	}
+
+	/**
+	 * Script URL for the checkbox, with our onload callback and explicit rendering.
+	 *
+	 * @param string $provider 'recaptcha_v2' or 'turnstile'.
+	 * @return string
+	 */
+	private function widget_script_url( string $provider ): string {
+		if ( 'turnstile' === $provider ) {
+			return 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=bcWidgetOnload';
+		}
+
+		return add_query_arg(
+			array(
+				'onload' => 'bcWidgetOnload',
+				'render' => 'explicit',
+				'hl'     => $this->language(),
+			),
+			'https://www.google.com/recaptcha/api.js'
+		);
+	}
+
+	/**
+	 * reCAPTCHA language code for the current locale.
+	 *
+	 * @return string
+	 */
+	private function language(): string {
+		$locale   = function_exists( 'determine_locale' ) ? determine_locale() : get_locale();
+		$regional = array( 'zh_CN', 'zh_TW', 'zh_HK', 'pt_BR', 'pt_PT', 'fr_CA', 'en_GB', 'es_419', 'de_AT', 'de_CH' );
+
+		if ( in_array( $locale, $regional, true ) ) {
+			return str_replace( '_', '-', $locale );
+		}
+
+		return strtolower( substr( (string) $locale, 0, 2 ) );
+	}
+
+	/* =====================================================================
+	 * Invisible reCAPTCHA v3 (contact forms only)
+	 * ===================================================================== */
+
+	/**
+	 * Render the reCAPTCHA v3 token injection script.
+	 *
+	 * A single delegated listener on the document in the CAPTURE phase, so it runs
+	 * before any form plugin's own submit handler whatever order scripts loaded in.
+	 * The form is only held while the library is usable; any timeout or rejection
+	 * releases it without a token, and the server rejects it as captcha_missing.
+	 * The token is single-use, cleared after each replay so an AJAX form that stays
+	 * on the page gets a fresh one.
+	 *
+	 * @param string $site_key reCAPTCHA v3 site key.
+	 */
+	private function render_v3_js( string $site_key ): void {
+		$config = array(
+			'siteKey' => $site_key,
+			'token'   => self::TOKEN_FIELD,
+			'error'   => self::ERROR_FIELD,
+			'skip'    => $this->elementor->client_skip_config(),
+		);
 		?>
 		<script>
 		(function() {
-			var siteKey   = <?php echo wp_json_encode( $site_key ); ?>;
+			var cfg       = <?php echo wp_json_encode( $config ); ?>;
 			var timeoutMs = 10000;
-			var fieldName = 'bc_captcha_token';
 
 			// Google's snippet defines grecaptcha.ready() synchronously, as a stub
-			// that queues the callback, well before the rest of the library has
-			// actually finished downloading — that is the whole point of ready(),
-			// per Google's own loading guide. Requiring execute() to already exist
-			// here defeats that: a visitor who submits quickly after the page loads
-			// would find it still missing, and this check would step aside and let
-			// the form go out with no token at all. Availability only means the
-			// stub exists; readiness (including execute()) is confirmed inside the
-			// ready() callback below.
+			// that queues the callback before the rest of the library has loaded.
+			// Availability only means the stub exists; execute() is checked inside
+			// the ready() callback.
 			function bcAvailable() {
 				return typeof grecaptcha !== 'undefined' &&
 					typeof grecaptcha.ready === 'function';
@@ -220,15 +620,24 @@ class CaptchaProvider {
 				}
 			}
 
-			function bcSetToken(form, token) {
-				var input = form.querySelector('input[name="' + fieldName + '"]');
+			function bcSetField(form, name, value) {
+				var input = form.querySelector('input[name="' + name + '"]');
 				if (!input) {
+					if (!value) return;
 					input = document.createElement('input');
 					input.type = 'hidden';
-					input.name = fieldName;
+					input.name = name;
 					form.appendChild(input);
 				}
-				input.value = token;
+				input.value = value;
+			}
+
+			// Elementor forms carrying their own configured reCAPTCHA are left to
+			// Elementor. Mirrors the server-side step-back exactly.
+			function bcHasOwnCaptcha(form) {
+				var own = form.querySelector('.elementor-g-recaptcha');
+				if (!own) return false;
+				return own.getAttribute('data-type') === 'v3' ? !!cfg.skip.v3 : !!cfg.skip.v2;
 			}
 
 			function bcResubmit(form) {
@@ -242,57 +651,30 @@ class CaptchaProvider {
 				}
 			}
 
-			// A single delegated listener on the document, in the CAPTURE phase,
-			// rather than one bound to each form. This is deliberate and fixes a
-			// real bug: a bubble-phase listener bound to the form itself only runs
-			// before a form-plugin's OWN submit handler (Elementor, CF7, Gravity,
-			// Formidable) if ours happens to have been registered first — which
-			// depends on script load order and is not something this plugin
-			// controls. When the form plugin's handler ran first, it submitted
-			// immediately with no token, the server correctly rejected it, and our
-			// handler's own retry succeeded moments later — which is exactly what
-			// showed up in testing as every submission needing two attempts.
-			//
-			// A capture-phase listener on document always runs before ANY listener
-			// bound directly on the form, regardless of registration order — that
-			// is how the browser's event dispatch order works, not a race we have
-			// to win. stopPropagation() here stops the event before it reaches the
-			// form at all, so on the intercepted pass the form plugin's own handler
-			// never runs; on the replay pass (below) we deliberately let the event
-			// through untouched so it does.
-			//
-			// This also binds every form on the page once, including ones added
-			// after page load (an Elementor popup, an AJAX-loaded section), which
-			// a one-time DOMContentLoaded scan over existing forms would miss.
 			document.addEventListener('submit', function(e) {
 				var form = e.target;
 				if (!form || form.tagName !== 'FORM') return;
+				if (bcHasOwnCaptcha(form)) return;
 
 				// Replay pass: the token is attached, let every other handler run.
 				if (form.bcCaptchaReplay) {
 					form.bcCaptchaReplay = false;
-					// Clear after the current dispatch so a second submission of an
-					// AJAX form gets a fresh token rather than a duplicate.
 					setTimeout(function() {
-						var input = form.querySelector('input[name="' + fieldName + '"]');
-						if (input) input.value = '';
+						bcSetField(form, cfg.token, '');
+						bcSetField(form, cfg.error, '');
 					}, 0);
 					return;
 				}
 
-				// A request is already in flight for this form; drop the duplicate
-				// click rather than letting it through to fail as a wasted extra
-				// submission.
+				// A request is already in flight for this form; drop the duplicate.
 				if (form.bcCaptchaPending) {
 					e.preventDefault();
 					e.stopPropagation();
 					return;
 				}
 
-				// Never hold a form hostage to a library that is not there at all
-				// (blocked script, ad blocker, network failure). Per-form, not
-				// shared across the page: one form giving up must not silently stop
-				// checking every other form too.
+				// Never hold a form hostage to a library that is not there at all.
+				// Per form: one form giving up must not stop checking the others.
 				if (form.bcCaptchaGivenUp || !bcAvailable()) return;
 
 				e.preventDefault();
@@ -301,53 +683,48 @@ class CaptchaProvider {
 
 				var done = false;
 
-				function finish(token) {
+				function finish(token, code) {
 					if (done) return;
 					done = true;
 					clearTimeout(timer);
 					form.bcCaptchaPending = false;
 					form.bcCaptchaReplay  = true;
-					bcSetToken(form, token || '');
+					bcSetField(form, cfg.token, token || '');
+					bcSetField(form, cfg.error, token ? '' : (code || ''));
 					bcResubmit(form);
 				}
 
-				var timer = setTimeout(function() {
+				function giveUp(code, message) {
 					form.bcCaptchaGivenUp = true;
-					bcWarn('reCAPTCHA timed out after ' + timeoutMs + 'ms; submitting without a token.');
-					finish('');
+					bcWarn(message);
+					finish('', code);
+				}
+
+				var timer = setTimeout(function() {
+					giveUp('v3-timeout', 'reCAPTCHA timed out after ' + timeoutMs + 'ms; submitting without a token.');
 				}, timeoutMs);
 
 				try {
 					grecaptcha.ready(function() {
-						// The stub exists, but the rest of the library may still
-						// be missing pieces in rare cases — check again before use.
 						if (typeof grecaptcha.execute !== 'function') {
-							form.bcCaptchaGivenUp = true;
-							bcWarn('grecaptcha loaded without execute(); submitting without a token.');
-							finish('');
+							giveUp('v3-no-execute', 'grecaptcha loaded without execute(); submitting without a token.');
 							return;
 						}
 						try {
-							grecaptcha.execute(siteKey, {action: 'submit'}).then(
+							grecaptcha.execute(cfg.siteKey, {action: 'submit'}).then(
 								function(token) {
-									finish(token);
+									finish(token, '');
 								},
 								function() {
-									form.bcCaptchaGivenUp = true;
-									bcWarn('reCAPTCHA execute() was rejected; submitting without a token.');
-									finish('');
+									giveUp('v3-rejected', 'reCAPTCHA execute() was rejected; submitting without a token.');
 								}
 							);
 						} catch (err) {
-							form.bcCaptchaGivenUp = true;
-							bcWarn('reCAPTCHA execute() threw; submitting without a token.');
-							finish('');
+							giveUp('v3-rejected', 'reCAPTCHA execute() threw; submitting without a token.');
 						}
 					});
 				} catch (err) {
-					form.bcCaptchaGivenUp = true;
-					bcWarn('grecaptcha.ready() threw; submitting without a token.');
-					finish('');
+					giveUp('v3-rejected', 'grecaptcha.ready() threw; submitting without a token.');
 				}
 			}, true);
 		})();
@@ -355,242 +732,230 @@ class CaptchaProvider {
 		<?php
 	}
 
-	/**
-	 * Render Cloudflare Turnstile token injection script.
-	 *
-	 * Unlike the reCAPTCHA path this never intercepts submission — the widget
-	 * populates cf-turnstile-response on its own — so there is no way to deadlock
-	 * a form here. What it does need is a reset after each submission: Turnstile
-	 * tokens are single-use, so an AJAX form that stays on the page would
-	 * otherwise replay a spent token and be rejected as timeout-or-duplicate.
-	 *
-	 * @param string $site_key Turnstile site key.
-	 */
-	private function render_turnstile_js( string $site_key ): void {
-		?>
-		<script>
-		(function() {
-			var siteKey = <?php echo wp_json_encode( $site_key ); ?>;
+	/* =====================================================================
+	 * Verification
+	 * ===================================================================== */
 
-			function bcWarn(message) {
-				if (window.console && console.warn) {
-					console.warn('bc-security: ' + message);
-				}
+	/**
+	 * Verify the token in the current request against a pair's saved keys.
+	 *
+	 * Fails closed on a missing, implausible or rejected token. Fails open — with
+	 * reason 'captcha_unavailable' — when the provider cannot be reached or reports
+	 * a fault with our configuration (only Cloudflare ever reports a bad secret).
+	 * Callers decide what "open" means: forms and reset let the request through,
+	 * the login escape hatch falls back to the lockout.
+	 *
+	 * @param string $pair 'main' or 'v3'.
+	 * @return array Array with 'success' (bool), 'score' (float) and optionally 'reason' (string).
+	 */
+	public function verify_pair( string $pair ): array {
+		if ( ! $this->is_pair_active( $pair ) ) {
+			return array( 'success' => true, 'score' => 1.0 );
+		}
+
+		$keys        = CaptchaSettings::pair( $pair );
+		$fingerprint = $this->pair_fingerprint( $pair );
+		$token       = $this->post_string( self::TOKEN_FIELD );
+
+		if ( '' === $token ) {
+			$code = sanitize_key( $this->post_string( self::ERROR_FIELD ) );
+
+			if ( in_array( $code, self::CLIENT_ERROR_CODES, true ) ) {
+				$this->health->failure( $pair, $fingerprint, 'client:' . $code );
 			}
 
-			document.addEventListener('DOMContentLoaded', function() {
-				if (typeof turnstile === 'undefined' || typeof turnstile.render !== 'function') {
-					bcWarn('Turnstile library unavailable; forms submit without a token.');
-					return;
-				}
-
-				var forms = document.querySelectorAll('form');
-
-				for (var i = 0; i < forms.length; i++) {
-					(function(form) {
-						if (form.getAttribute('data-bc-captcha') === '1') return;
-						form.setAttribute('data-bc-captcha', '1');
-
-						var container = document.createElement('div');
-						container.className = 'cf-turnstile';
-						container.setAttribute('data-sitekey', siteKey);
-						container.setAttribute('data-size', 'invisible');
-						form.appendChild(container);
-
-						var widgetId;
-
-						try {
-							widgetId = turnstile.render(container);
-						} catch (err) {
-							bcWarn('Turnstile render() failed; this form submits without a token.');
-							return;
-						}
-
-						form.addEventListener('submit', function() {
-							// Reset after the current dispatch so the widget issues a
-							// fresh token for any subsequent submission of this form.
-							setTimeout(function() {
-								try {
-									if (typeof turnstile.reset === 'function') {
-										turnstile.reset(widgetId);
-									}
-								} catch (err) {
-									bcWarn('Turnstile reset() failed; the next submission may be rejected as a duplicate.');
-								}
-							}, 0);
-						});
-					})(forms[i]);
-				}
-			});
-		})();
-		</script>
-		<?php
-	}
-
-	/**
-	 * Verify the CAPTCHA token from the current request.
-	 *
-	 * Fails open — with reason 'captcha_unavailable' — when the provider or our own
-	 * keys are at fault, and records the cause for the admin notice. Fails closed on
-	 * a genuine bot verdict: a missing token, an implausible one, or a rejection the
-	 * provider attributes to the submitted response.
-	 *
-	 * @return array Verification result with 'success' (bool), 'score' (float), and optionally 'reason' (string).
-	 */
-	public function verify(): array {
-		$pass = array( 'success' => true, 'score' => 1.0 );
-
-		if ( ! $this->is_enabled() ) {
-			return $pass;
-		}
-
-		$settings = $this->get_settings();
-
-		// A missing site key means enqueue_scripts() and render_token_js() both
-		// bailed, so no script was printed and no token can possibly exist —
-		// failing closed here would block every submission on the site. A missing
-		// secret key means there is nothing to verify against.
-		if ( empty( $settings['captcha_site_key'] ) || empty( $settings['captcha_secret_key'] ) ) {
-			return $pass;
-		}
-
-		$token = $this->get_token();
-		if ( empty( $token ) ) {
 			return array( 'success' => false, 'score' => 0.0, 'reason' => 'captcha_missing' );
 		}
 
-		// Reject implausible tokens locally so a bot cannot provoke a bad-request
-		// response, which is classified below as a configuration fault and fails
-		// open. If this check is ever loosened, bad-request must move to the
-		// fail-closed list.
 		if ( ! $this->is_plausible_token( $token ) ) {
 			return array( 'success' => false, 'score' => 0.0, 'reason' => 'captcha_failed' );
 		}
 
-		$provider = $settings['captcha_provider'];
+		$response = $this->siteverify( $keys['provider'], $keys['secret'], $token, $this->get_remote_ip(), 5 );
+		$parsed   = $this->parse_siteverify( $response, $keys['provider'] );
 
-		if ( $provider === 'recaptcha_v3' ) {
-			return $this->verify_recaptcha( $token, $settings );
-		} elseif ( $provider === 'turnstile' ) {
-			return $this->verify_turnstile( $token, $settings );
+		if ( null !== $parsed['result'] ) {
+			if ( empty( $parsed['result']['success'] ) ) {
+				$this->health->failure( $pair, $fingerprint, 'provider' );
+			}
+
+			return $parsed['result'];
 		}
 
-		return $pass;
+		// The keys work, even if this visitor's score turns out to be low.
+		$this->health->success( $pair, $fingerprint );
+
+		if ( 'v3' === $pair ) {
+			$settings  = CaptchaSettings::get();
+			$score     = isset( $parsed['body']['score'] ) ? (float) $parsed['body']['score'] : 0.0;
+			$threshold = (float) $settings['captcha_score_threshold'];
+
+			if ( $score < $threshold ) {
+				return array( 'success' => false, 'score' => $score, 'reason' => 'captcha_score:' . $score );
+			}
+
+			return array( 'success' => true, 'score' => $score );
+		}
+
+		return array( 'success' => true, 'score' => 1.0 );
 	}
 
 	/**
-	 * Check whether a secret key is accepted by its provider.
+	 * Check a genuine token, produced in the administrator's browser with the typed
+	 * site key, against the typed secret. Marks the pair verified only on success.
 	 *
-	 * Deliberately sends an invalid token. If the provider rejects the *token*, the
-	 * secret was accepted and the key is good; if it rejects the *secret*, the key
-	 * is broken. Takes the values as arguments rather than reading settings, so an
-	 * admin can test a pasted key before saving it.
-	 *
-	 * @param string $provider   Provider slug.
-	 * @param string $secret_key Secret key to test.
+	 * @param string $pair     'main' or 'v3'.
+	 * @param string $provider Provider slug.
+	 * @param string $site     Typed site key.
+	 * @param string $secret   Typed secret key.
+	 * @param string $token    Token from the probe.
 	 * @return array Array with 'ok' (bool) and 'message' (string).
 	 */
-	public function test_keys( string $provider, string $secret_key ): array {
-		$endpoints = array(
-			'recaptcha_v3' => 'https://www.google.com/recaptcha/api/siteverify',
-			'turnstile'    => 'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-		);
+	public function test_pair( string $pair, string $provider, string $site, string $secret, string $token ): array {
+		$allowed = 'v3' === $pair ? array( 'recaptcha_v3' ) : CaptchaSettings::MAIN_PROVIDERS;
 
-		if ( ! isset( $endpoints[ $provider ] ) ) {
-			return array( 'ok' => false, 'message' => 'Select a CAPTCHA provider first.' );
+		if ( ! in_array( $provider, $allowed, true ) || ! isset( self::$endpoints[ $provider ] ) ) {
+			return array( 'ok' => false, 'message' => 'Choose a CAPTCHA provider first.' );
 		}
 
-		if ( empty( $secret_key ) ) {
-			return array( 'ok' => false, 'message' => 'Enter a secret key first.' );
+		if ( '' === $site || '' === $secret ) {
+			return array( 'ok' => false, 'message' => 'Enter both the site key and the secret key first.' );
 		}
 
-		$response = wp_remote_post( $endpoints[ $provider ], array(
-			'body' => array(
-				'secret'   => $secret_key,
-				'response' => 'bc-security-key-test',
-			),
-			'timeout' => 10,
-		) );
+		if ( '' === $token || ! $this->is_plausible_token( $token ) ) {
+			return array( 'ok' => false, 'message' => 'No test token arrived from your browser. Run the test again.' );
+		}
+
+		$name     = 'turnstile' === $provider ? 'Cloudflare' : 'Google';
+		$host     = CaptchaSettings::home_host();
+		$response = $this->siteverify( $provider, $secret, $token, '', 10 );
 
 		if ( is_wp_error( $response ) ) {
 			return array(
 				'ok'      => false,
-				'message' => 'Could not reach the provider: ' . $response->get_error_message(),
+				'message' => "This server couldn't reach {$name} (" . $response->get_error_message() . '). Inconclusive; nothing was changed.',
 			);
 		}
 
 		$status = (int) wp_remote_retrieve_response_code( $response );
 
 		if ( $status < 200 || $status > 299 ) {
-			return array( 'ok' => false, 'message' => "Provider returned HTTP {$status}." );
+			return array( 'ok' => false, 'message' => "{$name} returned HTTP {$status}. Inconclusive; try again shortly." );
 		}
 
 		$body = json_decode( wp_remote_retrieve_body( $response ), true );
 
 		if ( ! is_array( $body ) ) {
-			return array( 'ok' => false, 'message' => 'Provider returned a response we could not read.' );
+			return array( 'ok' => false, 'message' => "{$name} returned a response we couldn't read. Inconclusive; try again shortly." );
+		}
+
+		if ( ! empty( $body['success'] ) ) {
+			$testing_key = ( isset( $body['hostname'] ) && 'testkey.google.com' === $body['hostname'] )
+				|| ! empty( $body['metadata']['result_with_testing_key'] );
+
+			if ( $testing_key ) {
+				return array(
+					'ok'      => false,
+					'message' => "These are {$name}'s public test keys, which accept everything. Use keys created for this site.",
+				);
+			}
+
+			$has_score = array_key_exists( 'score', $body );
+
+			if ( 'recaptcha_v3' === $provider && ! $has_score ) {
+				return array( 'ok' => false, 'message' => 'Google accepted these keys, but they are reCAPTCHA v2 keys. This option needs v3 keys.' );
+			}
+
+			if ( 'recaptcha_v2' === $provider && $has_score ) {
+				return array( 'ok' => false, 'message' => 'Google accepted these keys, but they are reCAPTCHA v3 keys. This option needs v2 checkbox keys.' );
+			}
+
+			$fingerprint = CaptchaSettings::fingerprint( $pair, $provider, $site, $secret );
+			$this->verified->mark( $pair, $fingerprint, $host );
+
+			$saved   = hash_equals( $this->pair_fingerprint( $pair ), $fingerprint );
+			$message = 'Both keys work on ' . $host . '.' . ( $saved ? ' CAPTCHA is now active for this option.' : ' Save your settings to start using them.' );
+
+			$checked_on = isset( $body['hostname'] ) ? strtolower( (string) $body['hostname'] ) : '';
+
+			if ( '' !== $checked_on && $checked_on !== $host ) {
+				$message .= ' Note: the check ran on ' . $checked_on . '; make sure ' . $host . ' is also in the key\'s list of domains.';
+			}
+
+			return array( 'ok' => true, 'message' => $message );
 		}
 
 		$codes = isset( $body['error-codes'] ) && is_array( $body['error-codes'] )
 			? array_map( 'strval', $body['error-codes'] )
 			: array();
+		$list  = $codes ? ' (' . implode( ', ', $codes ) . ')' : '';
 
-		$secret_codes = array( 'invalid-input-secret', 'missing-input-secret', 'invalid-parsed-secret', 'invalid-keys' );
-
-		if ( array_intersect( $codes, $secret_codes ) ) {
-			return array(
-				'ok'      => false,
-				'message' => 'Secret key rejected (' . implode( ', ', $codes ) . '). Forms will fail open until this is fixed.',
-			);
+		if ( in_array( 'timeout-or-duplicate', $codes, true ) ) {
+			return array( 'ok' => false, 'message' => 'The test token expired before it could be checked. Run the test again.' );
 		}
 
-		// The secret was accepted — the only complaint is our deliberately bad token.
-		$token_codes = array( 'invalid-input-response', 'missing-input-response', 'timeout-or-duplicate', 'bad-request' );
+		if ( 'turnstile' === $provider ) {
+			if ( array_intersect( $codes, array( 'invalid-input-secret', 'missing-input-secret' ) ) ) {
+				return array( 'ok' => false, 'message' => 'Cloudflare rejected the secret key' . $list . '.' );
+			}
 
-		if ( array_intersect( $codes, $token_codes ) ) {
-			return array( 'ok' => true, 'message' => 'Secret key accepted. CAPTCHA verification is working.' );
+			return array( 'ok' => false, 'message' => 'Cloudflare issued a token for this site key but would not accept it with this secret key' . $list . '. The secret probably belongs to a different widget.' );
 		}
 
-		if ( empty( $codes ) ) {
-			return array( 'ok' => false, 'message' => 'Provider gave no verdict. Try again shortly.' );
-		}
-
-		return array( 'ok' => false, 'message' => 'Unexpected response: ' . implode( ', ', $codes ) );
+		return array( 'ok' => false, 'message' => 'Google issued a token for this site key but rejected it with this secret key' . $list . '. The secret key is wrong, or it belongs to a different key pair.' );
 	}
 
 	/**
-	 * Read the CAPTCHA token from POST data.
+	 * Read a string from POST data.
 	 *
-	 * @return string Token value or empty string.
+	 * @param string $key Field name.
+	 * @return string
 	 */
-	private function get_token(): string {
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified by the form plugin.
-		if ( ! empty( $_POST['bc_captcha_token'] ) ) {
-			return sanitize_text_field( wp_unslash( $_POST['bc_captcha_token'] ) );
+	private function post_string( string $key ): string {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonces are verified by the form or login flow.
+		if ( ! isset( $_POST[ $key ] ) || ! is_string( $_POST[ $key ] ) ) {
+			return '';
 		}
 
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified by the form plugin.
-		if ( ! empty( $_POST['cf-turnstile-response'] ) ) {
-			return sanitize_text_field( wp_unslash( $_POST['cf-turnstile-response'] ) );
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- As above.
+		return sanitize_text_field( wp_unslash( $_POST[ $key ] ) );
+	}
+
+	/**
+	 * Send a token to a provider's siteverify endpoint.
+	 *
+	 * @param string $provider Provider slug.
+	 * @param string $secret   Secret key.
+	 * @param string $token    Token.
+	 * @param string $remoteip Visitor IP, or empty to omit.
+	 * @param int    $timeout  Seconds.
+	 * @return array|\WP_Error
+	 */
+	private function siteverify( string $provider, string $secret, string $token, string $remoteip, int $timeout ) {
+		$body = array(
+			'secret'   => $secret,
+			'response' => $token,
+		);
+
+		if ( '' !== $remoteip ) {
+			$body['remoteip'] = $remoteip;
 		}
 
-		return '';
+		return wp_remote_post( self::$endpoints[ $provider ], array(
+			'body'    => $body,
+			'timeout' => $timeout,
+		) );
 	}
 
 	/**
 	 * Check that a token looks like something a CAPTCHA provider could have issued.
 	 *
-	 * Deliberately permissive: it covers URL-safe base64 (reCAPTCHA), standard
-	 * base64 including + and /, dotted tokens (Turnstile) and padding. The only
-	 * job here is to keep obviously hostile input away from the siteverify call so
-	 * a visitor cannot provoke a bad-request, which is classified as a
-	 * configuration fault and fails open. Rejecting a token shape some provider
-	 * legitimately issues would block real people, which is far worse than the
-	 * narrow bypass this guards against — so when in doubt, widen it.
-	 *
-	 * If this is ever narrowed, that is fine. If the character class is widened to
-	 * include whitespace or control characters, move 'bad-request' to the
-	 * fail-closed list in $config_error_codes.
+	 * Deliberately permissive: URL-safe and standard base64, dotted Turnstile tokens
+	 * and padding all pass. The only job here is to keep obviously hostile input
+	 * away from siteverify so a visitor cannot provoke a bad-request, which is
+	 * classified as a configuration fault and fails open. If the character class is
+	 * ever widened to whitespace or control characters, move 'bad-request' to the
+	 * fail-closed side.
 	 *
 	 * @param string $token Submitted token.
 	 * @return bool
@@ -606,32 +971,28 @@ class CaptchaProvider {
 	/**
 	 * Get the client IP for the provider's optional remoteip parameter.
 	 *
-	 * Uses IpResolver so the value matches what the rest of the plugin logs —
-	 * REMOTE_ADDR is the CDN edge on every Cloudflare-fronted site. The parameter
-	 * is advisory: IpResolver trusts X-Forwarded-For, so a spoofed header only
-	 * degrades the provider's own risk signal and cannot bypass verification.
+	 * Uses IpResolver so the value matches what the rest of the plugin logs. The
+	 * parameter is advisory: a spoofed header only degrades the provider's own
+	 * risk signal and cannot bypass verification.
 	 *
 	 * @return string Client IP, or an empty string when unresolved.
 	 */
 	private function get_remote_ip(): string {
-		$resolver = $this->ip_resolver ? $this->ip_resolver : new IpResolver();
-		$ip       = $resolver->get_client_ip();
+		$ip = $this->ip_resolver->get_client_ip();
 
-		return $ip === '0.0.0.0' ? '' : $ip;
+		return '0.0.0.0' === $ip ? '' : $ip;
 	}
 
 	/**
 	 * Decode and classify a siteverify response.
 	 *
 	 * Configuration and infrastructure faults fail OPEN and are recorded for the
-	 * admin notice — they are our problem, not the visitor's, and blocking real
-	 * people because a key expired is worse than briefly losing the check.
-	 * Genuine bot verdicts fail CLOSED.
+	 * admin notice. Verdicts about the token fail CLOSED.
 	 *
 	 * @param array|\WP_Error $response Raw wp_remote_post() result.
 	 * @param string          $provider Provider slug, for the error record.
 	 * @return array Array with 'body' (decoded body, or null) and 'result'
-	 *               (a verify() result to return as-is, or null to continue).
+	 *               (a verify_pair() result to return as-is, or null to continue).
 	 */
 	private function parse_siteverify( $response, string $provider ): array {
 		$open = array(
@@ -683,11 +1044,9 @@ class CaptchaProvider {
 	/**
 	 * Record the most recent CAPTCHA configuration fault for the admin notice.
 	 *
-	 * A transient rather than a log row: this is a site-configuration problem, not
-	 * a submission, and LogsTable renders any non-blocked status as a green "Sent"
-	 * badge, so a fault would display as a successful send. Rewritten only when the
-	 * payload changes, so a spam flood against a broken key cannot turn into one
-	 * database write per request.
+	 * A transient rather than a log row: this is a configuration problem, not a
+	 * submission. Rewritten only when the payload changes, so a flood cannot turn
+	 * into one database write per request.
 	 *
 	 * @param string $provider Provider slug.
 	 * @param array  $codes    Provider error codes, or a synthetic code.
@@ -711,64 +1070,5 @@ class CaptchaProvider {
 		}
 
 		set_transient( self::ERROR_TRANSIENT, $record, 6 * HOUR_IN_SECONDS );
-	}
-
-	/**
-	 * Verify a token against the Google reCAPTCHA v3 API.
-	 *
-	 * @param string $token   CAPTCHA token from client.
-	 * @param array  $settings Plugin settings.
-	 * @return array Verification result.
-	 */
-	private function verify_recaptcha( string $token, array $settings ): array {
-		$response = wp_remote_post( 'https://www.google.com/recaptcha/api/siteverify', array(
-			'body' => array(
-				'secret'   => $settings['captcha_secret_key'],
-				'response' => $token,
-				'remoteip' => $this->get_remote_ip(),
-			),
-			'timeout' => 5,
-		) );
-
-		$parsed = $this->parse_siteverify( $response, 'recaptcha_v3' );
-
-		if ( $parsed['result'] !== null ) {
-			return $parsed['result'];
-		}
-
-		$score     = isset( $parsed['body']['score'] ) ? (float) $parsed['body']['score'] : 0.0;
-		$threshold = (float) $settings['captcha_score_threshold'];
-
-		if ( $score < $threshold ) {
-			return array( 'success' => false, 'score' => $score, 'reason' => 'captcha_score:' . $score );
-		}
-
-		return array( 'success' => true, 'score' => $score );
-	}
-
-	/**
-	 * Verify a token against the Cloudflare Turnstile API.
-	 *
-	 * @param string $token   CAPTCHA token from client.
-	 * @param array  $settings Plugin settings.
-	 * @return array Verification result.
-	 */
-	private function verify_turnstile( string $token, array $settings ): array {
-		$response = wp_remote_post( 'https://challenges.cloudflare.com/turnstile/v0/siteverify', array(
-			'body' => array(
-				'secret'   => $settings['captcha_secret_key'],
-				'response' => $token,
-				'remoteip' => $this->get_remote_ip(),
-			),
-			'timeout' => 5,
-		) );
-
-		$parsed = $this->parse_siteverify( $response, 'turnstile' );
-
-		if ( $parsed['result'] !== null ) {
-			return $parsed['result'];
-		}
-
-		return array( 'success' => true, 'score' => 1.0 );
 	}
 }

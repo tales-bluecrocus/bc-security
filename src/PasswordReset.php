@@ -40,6 +40,17 @@ class PasswordReset {
 	private $in_reset_request = false;
 
 	/**
+	 * True when the reset POST came through wp-login.php's own form.
+	 *
+	 * retrieve_password() is also called by WooCommerce's My Account reset form and
+	 * other front-end forms, which never show our checkbox. The CAPTCHA only applies
+	 * where we rendered it; the throttle and cooldown apply everywhere.
+	 *
+	 * @var bool
+	 */
+	private $via_login_form = false;
+
+	/**
 	 * @var CaptchaProvider|null
 	 */
 	private $captcha;
@@ -63,6 +74,16 @@ class PasswordReset {
 		// core aliases both action names to the same handler, so hook both.
 		add_action( 'login_form_lostpassword', array( $this, 'check_reset_throttle' ) );
 		add_action( 'login_form_retrievepassword', array( $this, 'check_reset_throttle' ) );
+
+		// Remember that this POST came from wp-login.php's own form, the only place
+		// our checkbox is shown. Priority 1: set before anything can exit.
+		add_action( 'login_form_lostpassword', array( $this, 'mark_login_form' ), 1 );
+		add_action( 'login_form_retrievepassword', array( $this, 'mark_login_form' ), 1 );
+
+		// The checkbox on the lost-password form.
+		add_action( 'login_enqueue_scripts', array( $this, 'enqueue_reset_captcha' ) );
+		add_action( 'lostpassword_form', array( $this, 'render_reset_captcha' ) );
+		add_action( 'login_footer', array( $this, 'print_reset_captcha_js' ) );
 
 		// Count the attempt and enforce the per-account cooldown.
 		add_action( 'lostpassword_post', array( $this, 'on_reset_request' ), 10, 2 );
@@ -158,21 +179,61 @@ class PasswordReset {
 	}
 
 	/**
-	 * Verify the CAPTCHA token on the lost-password form.
+	 * Note that this reset POST came through wp-login.php's own form.
+	 */
+	public function mark_login_form(): void {
+		if ( isset( $_SERVER['REQUEST_METHOD'] ) && 'POST' === $_SERVER['REQUEST_METHOD'] ) {
+			$this->via_login_form = true;
+		}
+	}
+
+	/**
+	 * Load the checkbox script on the lost-password screen.
+	 */
+	public function enqueue_reset_captcha(): void {
+		if ( $this->is_reset_screen() && $this->reset_captcha_active() ) {
+			$this->captcha->enqueue_widget_login();
+		}
+	}
+
+	/**
+	 * Print the checkbox inside the lost-password form.
+	 */
+	public function render_reset_captcha(): void {
+		if ( $this->reset_captcha_active() ) {
+			$this->captcha->print_widget_container();
+		}
+	}
+
+	/**
+	 * Print the checkbox script in the lost-password screen's footer.
+	 */
+	public function print_reset_captcha_js(): void {
+		if ( $this->is_reset_screen() && $this->reset_captcha_active() ) {
+			$this->captcha->print_widget_js( 'reset' );
+		}
+	}
+
+	/**
+	 * Verify the checkbox on the lost-password form.
 	 *
-	 * Gated on is_lostpassword_enabled() rather than is_protection_enabled(), so
-	 * turning off the rate limiter does not silently turn off the CAPTCHA too.
+	 * Gated on is_reset_active() rather than is_protection_enabled(), so turning off
+	 * the rate limiter does not silently turn off the CAPTCHA too. Only applies to
+	 * POSTs from wp-login.php's own form, where the checkbox was shown.
 	 *
 	 * @param \WP_Error $errors Error collector passed through lostpassword_post.
 	 * @return bool True to continue processing, false if the request was rejected.
 	 */
 	private function check_captcha( $errors ): bool {
-		if ( ! $this->captcha || ! $this->captcha->is_lostpassword_enabled() ) {
+		if ( ! $this->via_login_form || ! $this->reset_captcha_active() ) {
 			return true;
 		}
 
-		$result = $this->captcha->verify();
+		$result = $this->captcha->verify_pair( 'main' );
 
+		// Passed, or the provider could not be reached (recorded for the admin
+		// notice). Reset is let through in that case: the throttle and cooldown
+		// still apply, and blocking all password recovery is worse.
 		if ( ! empty( $result['success'] ) ) {
 			return true;
 		}
@@ -184,10 +245,31 @@ class PasswordReset {
 			// place it renders alongside the CAPTCHA error, handing the account
 			// enumeration oracle back to any bot that simply omits the token.
 			$errors->remove( 'invalid_email' );
-			$errors->add( 'captcha_failed', '<strong>Error:</strong> Verification failed. Please try again.' );
+			$errors->add( 'captcha_failed', '<strong>Error:</strong> Please complete the security check and try again.' );
 		}
 
 		return false;
+	}
+
+	/**
+	 * Check whether the lost-password checkbox is in force.
+	 *
+	 * @return bool
+	 */
+	private function reset_captcha_active(): bool {
+		return null !== $this->captcha && $this->captcha->is_reset_active();
+	}
+
+	/**
+	 * Check whether this wp-login.php request is the lost-password screen.
+	 *
+	 * @return bool
+	 */
+	private function is_reset_screen(): bool {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Routing only.
+		$action = isset( $_REQUEST['action'] ) ? sanitize_key( wp_unslash( $_REQUEST['action'] ) ) : '';
+
+		return in_array( $action, array( 'lostpassword', 'retrievepassword' ), true );
 	}
 
 	/**

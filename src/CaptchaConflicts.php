@@ -8,6 +8,10 @@
  * consumed and doubles the chances of a real visitor being wrongly blocked,
  * without catching meaningfully more bots.
  *
+ * Elementor Pro is the exception: when its reCAPTCHA is fully configured, BC
+ * Security steps back on the forms carrying Elementor's field (ElementorCaptcha),
+ * so it is reported as handled rather than as a conflict.
+ *
  * This class only reports. It never blocks saving and never disables anything.
  *
  * @package BcSecurity
@@ -26,13 +30,19 @@ class CaptchaConflicts {
 	 * @var array
 	 */
 	private static $key_options = array(
-		'Elementor Pro'                          => array(
-			'elementor_pro_recaptcha_site_key',
-			'elementor_pro_recaptcha_v3_site_key',
-		),
 		'Contact Form 7'                         => array( 'wpcf7_recaptcha_sitekey' ),
 		'Simple Cloudflare Turnstile'            => array( 'cfturnstile_key' ),
 		'Advanced noCaptcha & Invisible Captcha' => array( 'anr_site_key' ),
+	);
+
+	/**
+	 * Elementor Pro's site-key options.
+	 *
+	 * @var array
+	 */
+	private static $elementor_site_options = array(
+		'elementor_pro_recaptcha_site_key',
+		'elementor_pro_recaptcha_v3_site_key',
 	);
 
 	/**
@@ -52,19 +62,50 @@ class CaptchaConflicts {
 	);
 
 	/**
+	 * @var ElementorCaptcha
+	 */
+	private $elementor;
+
+	/**
+	 * @param ElementorCaptcha|null $elementor Elementor reCAPTCHA detection.
+	 */
+	public function __construct( ?ElementorCaptcha $elementor = null ) {
+		$this->elementor = $elementor ? $elementor : new ElementorCaptcha();
+	}
+
+	/**
 	 * Detect other CAPTCHA providers on this site.
 	 *
-	 * @return array Array with 'configured' (plugins with CAPTCHA keys actually set)
-	 *               and 'possible' (active plugins that can provide a CAPTCHA).
+	 * @return array Array with 'configured' (plugins with CAPTCHA keys actually set),
+	 *               'possible' (active plugins that can provide a CAPTCHA) and
+	 *               'stepback' (plugins whose forms BC Security leaves alone).
 	 */
 	public function detect(): array {
 		$configured = array();
 		$possible   = array();
+		$stepback   = array();
 
 		foreach ( self::$key_options as $label => $options ) {
 			foreach ( $options as $option ) {
 				if ( ! empty( get_option( $option, '' ) ) ) {
 					$configured[] = $label;
+					break;
+				}
+			}
+		}
+
+		// Elementor: fully configured means handled. A site key without its secret
+		// means Elementor draws a widget it never checks, while our CAPTCHA also
+		// runs on that form — a genuine conflict.
+		$elementor_v2 = $this->elementor->is_configured( 'recaptcha' );
+		$elementor_v3 = $this->elementor->is_configured( 'recaptcha_v3' );
+
+		if ( $elementor_v2 || $elementor_v3 ) {
+			$stepback[] = 'Elementor Pro';
+		} else {
+			foreach ( self::$elementor_site_options as $option ) {
+				if ( '' !== trim( (string) get_option( $option, '' ) ) ) {
+					$configured[] = 'Elementor Pro (site key without a secret key)';
 					break;
 				}
 			}
@@ -103,6 +144,7 @@ class CaptchaConflicts {
 		return array(
 			'configured' => array_values( array_unique( $configured ) ),
 			'possible'   => array_values( array_unique( $possible ) ),
+			'stepback'   => $stepback,
 		);
 	}
 }
