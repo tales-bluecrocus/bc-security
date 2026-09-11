@@ -28,6 +28,11 @@ class SpamFilter {
 	private $captcha;
 
 	/**
+	 * @var ElementorCaptcha
+	 */
+	private $elementor;
+
+	/**
 	 * Default blocked keywords used when settings have not been saved yet.
 	 *
 	 * @var array
@@ -189,14 +194,16 @@ class SpamFilter {
 	);
 
 	/**
-	 * @param IpResolver      $ip_resolver IP detection dependency.
-	 * @param FormLogger      $logger      Form submission logger.
-	 * @param CaptchaProvider $captcha     CAPTCHA verification provider.
+	 * @param IpResolver            $ip_resolver IP detection dependency.
+	 * @param FormLogger            $logger      Form submission logger.
+	 * @param CaptchaProvider       $captcha     CAPTCHA verification provider.
+	 * @param ElementorCaptcha|null $elementor   Elementor reCAPTCHA detection.
 	 */
-	public function __construct( IpResolver $ip_resolver, FormLogger $logger, CaptchaProvider $captcha ) {
+	public function __construct( IpResolver $ip_resolver, FormLogger $logger, CaptchaProvider $captcha, ?ElementorCaptcha $elementor = null ) {
 		$this->ip_resolver = $ip_resolver;
 		$this->logger      = $logger;
 		$this->captcha     = $captcha;
+		$this->elementor   = $elementor ? $elementor : new ElementorCaptcha();
 	}
 
 	/**
@@ -294,12 +301,23 @@ class SpamFilter {
 	/**
 	 * Verify CAPTCHA token and log if blocked.
 	 *
+	 * Uses whichever contact-form mode is in force on this site: the main checkbox
+	 * or invisible reCAPTCHA v3. Off (the default, and whenever the needed keys have
+	 * not passed Test Keys) means no CAPTCHA check at all.
+	 *
 	 * @param string $form_plugin Form plugin identifier.
 	 * @param array  $fields      Form field data for logging.
+	 * @param bool   $skip        True when this submission is not ours to check.
 	 * @return string|null Block reason if CAPTCHA failed, null if passed.
 	 */
-	private function check_captcha( string $form_plugin, array $fields ): ?string {
-		$result = $this->captcha->verify();
+	private function check_captcha( string $form_plugin, array $fields, bool $skip = false ): ?string {
+		$mode = $this->captcha->forms_mode();
+
+		if ( 'off' === $mode || $skip ) {
+			return null;
+		}
+
+		$result = $this->captcha->verify_pair( 'checkbox' === $mode ? 'main' : 'v3' );
 
 		if ( ! $result['success'] ) {
 			$this->logger->log( array(
@@ -343,6 +361,9 @@ class SpamFilter {
 		$post_data = $_POST;
 		$fields    = array();
 
+		// CAPTCHA tokens are 1–2 KB of random base64. Scanned as text, short keywords
+		// ("seo", "btc", "nft", "ico", "cbd", "mlm") turn up in roughly a quarter of
+		// them by pure chance, silently blocking real visitors as spam.
 		$skip_keys = array(
 			'bc_hp_field',
 			'_wpnonce',
@@ -352,6 +373,11 @@ class SpamFilter {
 			'post_id',
 			'queried_id',
 			'referrer_title',
+			'bc_captcha_token',
+			'bc_captcha_error',
+			'g-recaptcha-response',
+			'cf-turnstile-response',
+			'_wpcf7_recaptcha_response',
 		);
 
 		foreach ( $post_data as $key => $value ) {
@@ -424,8 +450,9 @@ class SpamFilter {
 			}
 		}
 
-		// CAPTCHA check.
-		$captcha_reason = $this->check_captcha( 'elementor', $fields );
+		// CAPTCHA check. Forms carrying Elementor's own configured reCAPTCHA are
+		// left to Elementor, which verifies that field itself.
+		$captcha_reason = $this->check_captcha( 'elementor', $fields, $this->elementor->form_has_own_captcha( $record ) );
 		if ( $captcha_reason !== null ) {
 			$handler->add_error_message( 'Your submission could not be processed.' );
 			$handler->add_error( 'bc_spam', 'Your submission could not be processed.' );
@@ -577,8 +604,16 @@ class SpamFilter {
 
 		$fields = $this->get_post_text_fields();
 
-		// CAPTCHA check.
-		$captcha_reason = $this->check_captcha( 'gravity', $fields );
+		// CAPTCHA check, on the final submission only. Gravity runs this filter for
+		// every "Next" on a multi-page form too, where no check is shown; its hidden
+		// target-page field is 0 only when the form is actually being submitted.
+		$form_id     = isset( $validation_result['form']['id'] ) ? absint( $validation_result['form']['id'] ) : 0;
+		$target_key  = 'gform_target_page_number_' . $form_id;
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Routing only; Gravity verifies its own submission.
+		$target_page = isset( $_POST[ $target_key ] ) ? sanitize_text_field( wp_unslash( $_POST[ $target_key ] ) ) : '0';
+		$not_final   = '' !== $target_page && '0' !== $target_page;
+
+		$captcha_reason = $this->check_captcha( 'gravity', $fields, $not_final );
 		if ( $captcha_reason !== null ) {
 			$validation_result['is_valid'] = false;
 			foreach ( $validation_result['form']['fields'] as &$field ) {
