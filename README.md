@@ -34,8 +34,20 @@ Prevents attackers from discovering valid usernames:
 | Vector | Protection |
 |--------|------------|
 | REST API `/wp/v2/users` | Endpoint removed for unauthenticated visitors |
-| Author archives `/author/name/` | 301 redirect to homepage |
+| Author archives `/author/name/` | 301 redirect to homepage — the same for real and made-up names |
 | Query parameter `?author=1` | 301 redirect to homepage |
+| oEmbed data (`/wp-json/oembed/1.0/embed`) | Author page link removed; the author's display name is kept |
+| WordPress users sitemap (`wp-sitemap-users-1.xml`) | Removed |
+| Login error messages | One message for a wrong username, email or password |
+
+Every check gives the same answer whether or not the account exists — a different answer
+for a real name is itself the leak.
+
+**Author credit is unaffected.** Bylines and author boxes on posts still show the author.
+WordPress shows the *username* as the author name until someone changes it, so for
+authors who want credit, set **Users → Profile → "Display name publicly as"** to their real
+name. SEO plugins (Yoast, Rank Math) have their own author sitemaps, switched off in their
+settings.
 
 ### Password Reset Protection
 
@@ -165,7 +177,7 @@ integration, WPForms and others) is also serving a CAPTCHA, a warning appears in
 settings. Running two on one form makes submissions fail intermittently and consumes double
 the monthly quota, without catching more bots.
 
-**Upgrading from 2.2/2.3:**
+**Upgrading from 2.2:**
 - Contact-form CAPTCHA is switched **off** on every site
 - Existing reCAPTCHA v3 keys move to the contact-form Invisible slot, untested
 - Existing Turnstile keys stay in the login & password reset slot, untested
@@ -245,7 +257,7 @@ bc-security/
 │   ├── CaptchaKeyTest.php      # Test Keys: in-browser probe + server check
 │   ├── CaptchaVerifiedKeys.php # Which key pairs passed Test Keys on this host
 │   ├── CaptchaHealth.php       # Warns when tested keys stop working
-│   ├── CaptchaMigration.php    # One-time move from the 2.2/2.3 settings
+│   ├── CaptchaMigration.php    # One-time move from the 2.2 settings
 │   ├── CaptchaConflicts.php    # Detects competing CAPTCHA plugins
 │   ├── ElementorCaptcha.php    # Detects Elementor forms with their own reCAPTCHA
 │   ├── Database.php            # Table migration (bc_form_logs)

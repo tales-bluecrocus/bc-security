@@ -16,7 +16,7 @@ namespace BcSecurity;
 class AdminPage {
 
 	/**
-	 * admin-post action dismissing the one-time 2.4 CAPTCHA notice.
+	 * admin-post action dismissing the one-time 2.3 CAPTCHA notice.
 	 */
 	const DISMISS_ACTION = 'bc_dismiss_captcha_notice';
 
@@ -794,7 +794,7 @@ class AdminPage {
 	}
 
 	/**
-	 * One-time explanation of the 2.4 CAPTCHA changes, for sites that used CAPTCHA.
+	 * One-time explanation of the 2.3 CAPTCHA changes, for sites that used CAPTCHA.
 	 */
 	private function render_migration_notice(): void {
 		$legacy = get_option( CaptchaMigration::LEGACY_OPTION, null );
@@ -813,7 +813,7 @@ class AdminPage {
 		$dismiss = wp_nonce_url( admin_url( 'admin-post.php?action=' . self::DISMISS_ACTION ), self::DISMISS_ACTION );
 		?>
 		<div class="notice notice-info">
-			<p><strong>BlueCrocus Security 2.4 changed how CAPTCHA works.</strong></p>
+			<p><strong>BlueCrocus Security 2.3 changed how CAPTCHA works.</strong></p>
 			<ul style="list-style:disc;margin-left:20px;">
 				<li>Contact-form CAPTCHA is now <strong>off</strong>. The honeypot and keyword filter still protect your forms. You can switch it back on under "CAPTCHA — Contact forms".</li>
 				<?php if ( 'recaptcha_v3' === $provider ) : ?>
@@ -833,7 +833,7 @@ class AdminPage {
 	}
 
 	/**
-	 * Dismiss the one-time 2.4 CAPTCHA notice.
+	 * Dismiss the one-time 2.3 CAPTCHA notice.
 	 */
 	public function handle_dismiss_migration_notice(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {

@@ -1,7 +1,7 @@
 <?php
 /**
- * One-time move from the single-provider CAPTCHA settings of 2.2/2.3 to the
- * per-pair settings of 2.4.
+ * One-time move from the single-provider CAPTCHA settings of 2.2 to the
+ * per-pair settings of 2.3.
  *
  * Nothing it writes can block a visitor: every surface also needs its pair to pass
  * Test Keys on this host, and the verified list starts empty. So even a migration
@@ -57,7 +57,7 @@ class CaptchaMigration {
 			), '', 'no' );
 
 			// Contact-form CAPTCHA starts off everywhere (owner's decision); before
-			// 2.4 it switched on automatically for every form once keys were saved.
+			// 2.3 it switched on automatically for every form once keys were saved.
 			$settings['captcha_forms_mode']      = 'off';
 			$settings['captcha_login_challenge'] = true;
 

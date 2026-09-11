@@ -1,8 +1,16 @@
-# [2.4.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.3.0...v2.4.0) (2026-09-11)
+# [2.3.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.3...v2.3.0) (2026-09-11)
 
 
 ### Features
 
+* throttle lost-password requests per IP and send at most one reset email per account every 15 minutes
+* return the same confirmation for unknown accounts on the lost-password form
+* log password reset attempts to the existing form logs table
+* add a Password Reset Protection settings section to the admin page
+* show the same login error whether or not the username or email exists
+* stop author pages answering differently for real and made-up author names
+* remove the author page link (which reveals the login) from oEmbed data, keeping the author's name
+* remove WordPress's built-in users sitemap
 * add a visible "I'm not a robot" check (Google reCAPTCHA v2 or Cloudflare Turnstile) to the lost password form
 * show that check to a connection that hit the login limit, instead of the 15-minute lockout, so CAPTCHA can never lock anyone out
 * choose contact-form CAPTCHA per site: off (default), the same checkbox, or invisible reCAPTCHA v3 with its own keys
@@ -31,17 +39,6 @@
 * the old "Protect Login Page" option is replaced by the login check for flagged connections; reCAPTCHA v3 is no longer offered for login or password reset
 * sites that used CAPTCHA see a one-time notice explaining the change
 * after pushing staging to live, run Test Keys again on the live site
-
-
-# [2.3.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.3...v2.3.0) (2026-09-09)
-
-
-### Features
-
-* add PasswordReset class with per-IP throttle and per-account email cooldown
-* return a generic confirmation for unknown accounts on the lost-password form
-* log password reset attempts to the existing form logs table
-* add Password Reset Protection settings section to admin page
 
 
 ## [2.2.3](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.2...v2.2.3) (2026-03-30)

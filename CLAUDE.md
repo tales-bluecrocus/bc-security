@@ -32,7 +32,7 @@ bc-security/
 │   ├── CaptchaKeyTest.php      # Test Keys: probe page (admin-post) + token check (ajax)
 │   ├── CaptchaVerifiedKeys.php # Fingerprints of key pairs that passed Test Keys
 │   ├── CaptchaHealth.php       # Failure streaks → admin warning
-│   ├── CaptchaMigration.php    # One-time move from the 2.2/2.3 CAPTCHA settings
+│   ├── CaptchaMigration.php    # One-time move from the 2.2 CAPTCHA settings
 │   ├── CaptchaConflicts.php    # Detects competing CAPTCHA plugins
 │   ├── ElementorCaptcha.php    # Detects Elementor forms with their own reCAPTCHA
 │   ├── Database.php            # Table migration (bc_form_logs)
@@ -123,7 +123,10 @@ instead of the lockout:
 | `authenticate` | filter | Shared lockout check (covers wp-login + JWT), escape-hatch verification |
 | `rest_endpoints` | filter | Remove /wp/v2/users for unauthenticated |
 | `template_redirect` | action | Redirect author archives to homepage |
-| `parse_request` | action | Block ?author=N enumeration |
+| `parse_request` | action | Redirect `author` and `author_name` lookups (logged-out) — same answer for real and made-up names |
+| `oembed_response_data` | filter | Drop `author_url` (carries the login-derived slug); keep `author_name` |
+| `wp_sitemaps_add_provider` | filter | Remove core's `users` sitemap |
+| `authenticate` (40) | filter | Replace `invalid_username` / `invalid_email` / `incorrect_password` with one generic `incorrect_password` error |
 | `login_form_lostpassword` | action | Throttle gate before wp-login processes the reset POST; marks `via_login_form` (priority 1) |
 | `login_form_retrievepassword` | action | Same — core aliases both action names |
 | `lostpassword_post` | action | Count the reset attempt, verify the checkbox, apply per-account cooldown |
@@ -359,6 +362,7 @@ Table `wp_bc_form_logs` created via `dbDelta()`. Migration tracked by `bc_securi
 
 ## Key decisions
 
+- **Every enumeration vector gives one answer for real and made-up accounts** — a different answer for a real name (a 404 vs a redirect, "not registered" vs "wrong password", even a shake vs no shake) is the leak. Login errors are genericized at `authenticate` priority 40 (after BruteForce at 30), only when core's three enumeration codes are the whole error, so lockouts, the CAPTCHA check and other plugins' messages pass through. oEmbed keeps `author_name` (display name, already public on the post) and drops only `author_url`, because clients want author credit.
 - **XML-RPC fully disabled** rather than rate-limited — it supports `system.multicall` which can batch hundreds of auth attempts in one request.
 - **Transients for lockout state** — simpler, self-cleaning, no migration needed. Trade-off: not suitable for distributed setups without shared object cache.
 - **IP detection checks X-Forwarded-For first** — needed behind reverse proxies (Cloudflare, nginx). The first IP in the chain is used. This is spoofable by the client; a trusted-proxy fix is tracked separately.
