@@ -1,3 +1,28 @@
+# [2.4.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.3.0...v2.4.0) (2026-10-14)
+
+
+### Features
+
+* block contact-form submissions containing Russian/Ukrainian (Cyrillic), Chinese or Arabic text, with a tick box per language under Spam Protection
+* add 20 spam keywords found in an audit of received spam (AI agent pitches, lead-data sellers, fake Trezor downloads, "rank higher" offers, virtual assistant and proxy services)
+* add new built-in keywords to a site's saved keyword list once, so they reach sites that have already saved their settings
+
+
+### Bug Fixes
+
+* match keywords as whole words, so "ico" no longer blocks Nicole or Mexico, "defi" no longer blocks "definitely" and "act now" no longer blocks "contact now"
+* show the same built-in keyword list on the settings page that the filter uses; saving the page used to replace the full list with a 13-word one
+* check Formidable Forms answers and checkbox groups, which the keyword filter was skipping
+
+
+### Upgrade Notes
+
+* the language block is on for all three languages on every site; untick a language under Spam Protection on a site whose customers write in it
+* blocked submissions stay readable in the Logs tab, with the reason shown as `language:cyrillic`, `language:han` or `language:arabic`
+* a keyword glued inside a longer word is no longer caught: "crypto" does not block "cryptocurrency", so "cryptocurrency" is added to saved lists
+* "web design", "website design", "outreach", "outsourcing" and "proxies" are deliberately not built in, because they block real enquiries on some sites; add them per site where wanted
+
+
 # [2.3.0](https://github.com/tales-bluecrocus/bc-security/compare/v2.2.3...v2.3.0) (2026-09-11)
 
 

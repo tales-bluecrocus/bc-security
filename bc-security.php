@@ -43,6 +43,9 @@ require __DIR__ . '/vendor/autoload.php';
 // One-time move to the per-pair CAPTCHA settings of 2.3.
 ( new BcSecurity\CaptchaMigration() )->maybe_migrate();
 
+// One-time addition of new default keywords to a saved keyword list.
+( new BcSecurity\KeywordMigration() )->maybe_migrate();
+
 // Security features.
 $bc_elementor = new BcSecurity\ElementorCaptcha();
 $bc_captcha   = new BcSecurity\CaptchaProvider(

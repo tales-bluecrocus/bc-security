@@ -37,7 +37,8 @@ bc-security/
 │   ├── ElementorCaptcha.php    # Detects Elementor forms with their own reCAPTCHA
 │   ├── Database.php            # Table migration (bc_form_logs)
 │   ├── FormLogger.php          # Form submission logger
-│   ├── SpamFilter.php          # Honeypot + keyword spam filter + contact-form CAPTCHA
+│   ├── SpamFilter.php          # Honeypot + language + keyword spam filter + contact-form CAPTCHA
+│   ├── KeywordMigration.php    # One-time addition of new default keywords to saved lists
 │   ├── AdminPage.php           # Settings + Logs admin page, CAPTCHA notices
 │   └── LogsTable.php           # WP_List_Table for log display
 ├── .config/                    # Release scripts
@@ -69,7 +70,8 @@ bc-security/
 | `ElementorCaptcha` | Decides when an Elementor form's own reCAPTCHA takes over from ours |
 | `Database` | Creates/updates `wp_bc_form_logs` table via dbDelta |
 | `FormLogger` | Insert/query/clear form submission logs |
-| `SpamFilter` | Honeypot injection + keyword filter + contact-form CAPTCHA for Elementor/CF7/Gravity/Formidable |
+| `SpamFilter` | Honeypot injection + blocked alphabets + keyword filter + contact-form CAPTCHA for Elementor/CF7/Gravity/Formidable; owns `DEFAULT_KEYWORDS` and `SCRIPTS` |
+| `KeywordMigration` | Appends new default keywords to a saved keyword list once, tracked by `bc_security_keywords_rev` |
 | `AdminPage` | Settings + Logs admin page with tabs, CAPTCHA admin notices, migration notice dismissal |
 | `LogsTable` | WP_List_Table subclass for log display with pagination and filters |
 
@@ -247,8 +249,20 @@ With the reset checkbox active, those requests carry no token and are refused wi
 ### How it works
 
 1. `SpamFilter::inject_honeypot_js()` adds a hidden field to all forms via JavaScript (avoids caching issues)
-2. On form submit, validation hooks check: CAPTCHA (if a forms mode is in force)? → honeypot filled? → keyword match? → otherwise sent.
+2. On form submit, validation hooks check: CAPTCHA (if a forms mode is in force)? → honeypot filled? → blocked alphabet? → keyword match? → otherwise sent.
 3. All submissions (sent + blocked) are logged to `wp_bc_form_logs` via `FormLogger::log()`
+
+Block reasons: `honeypot`, `language:{cyrillic|han|arabic}`, `keyword:{keyword}`, plus the
+CAPTCHA reasons.
+
+**Blocked alphabets** — `check_scripts()` blocks a submission when any field holds a single
+letter matching `SpamFilter::SCRIPTS` (`\p{Cyrillic}`, `\p{Han}`, `\p{Arabic}`). Text PCRE
+cannot read (broken UTF-8) is let through.
+
+**Keywords match whole words** — `keyword_pattern()` requires a word edge on each side
+where the keyword starts/ends with a letter or digit (so `.xyz` and `#1 on google` still
+work), allows a plural `s`/`es`, treats an apostrophe + letter as part of the word, and
+lets a space match any whitespace. If PCRE cannot read the text it falls back to `stripos`.
 
 ### Form plugin hooks
 
@@ -263,9 +277,22 @@ With the reset checkbox active, those requests carry no token and are refused wi
 
 Stored in `wp_options` key `bc_security_settings`:
 - `honeypot_enabled` (bool, default true)
-- `blocked_keywords` (array, default: seo, marketing, bitcoin, crypto, casino, viagra, forex, backlinks, link building, guest post, cbd, diet pills, weight loss)
+- `blocked_keywords` (array, default `SpamFilter::DEFAULT_KEYWORDS` — the only copy, 160 entries)
+- `blocked_scripts` (array of `SpamFilter::SCRIPTS` slugs, default all three: `cyrillic`, `han`, `arabic`)
 
-`get_post_text_fields()` skips token fields (`bc_captcha_token`, `bc_captcha_error`,
+The defaults only apply until the settings page is first saved; after that the site keeps
+its own copy. **A new default keyword therefore needs two edits**: `DEFAULT_KEYWORDS` and
+`KeywordMigration::ADDED` (raise `REV`), or it never reaches a site with a saved list.
+`KeywordMigration::maybe_migrate()` runs at include time after `CaptchaMigration`, appends
+the missing words once, skips a list an admin emptied, and records
+`bc_security_keywords_rev`.
+
+Unticking every language posts no `blocked_scripts` key, exactly like a settings page
+opened before the field existed. The hidden `blocked_scripts_shown` tells them apart: with
+it the save means "none"; without it the sanitizer keeps the stored value.
+
+`get_post_text_fields()` unslashes and walks nested values (Formidable posts every answer
+as `item_meta[ID]`; checkbox groups are arrays), joining keys with a dot. It skips token fields (`bc_captcha_token`, `bc_captcha_error`,
 `g-recaptcha-response`, `cf-turnstile-response`, `_wpcf7_recaptcha_response`): scanned as
 text, ~28% of random tokens contain a short keyword (seo/btc/nft/mlm/ico/cbd).
 
@@ -386,6 +413,9 @@ Table `wp_bc_form_logs` created via `dbDelta()`. Migration tracked by `bc_securi
 - **Submit listeners run in the capture phase** — so they run before any form plugin's handler whatever order scripts loaded in.
 - **The token is single-use and cleared after each submit** — all four form plugins submit by AJAX and stay on the page, so a retained token was replayed on the second submission and rejected as `timeout-or-duplicate`.
 - **One CAPTCHA per form** — Elementor forms with their own configured reCAPTCHA are left to Elementor (Elementor's v3 handler submits via jQuery, so our script never sees a native submit). The decision comes from the saved form definition, never the request.
+- **Blocked alphabets are on by default and strict** (owner's decision) — the client sites are English-language, and one Cyrillic, Chinese or Arabic letter blocks the submission. Strict also catches look-alike Cyrillic letters swapped into English words to dodge the keyword list. Each alphabet has its own tick box for a site that serves those customers; blocked messages stay readable in Logs.
+- **Keywords match whole words, not substrings** — found anywhere in the text, `ico` blocked every Nicole and Mexico, `defi` every "definitely", `act now` every "contact now", in the name and email fields too. The cost: a keyword glued inside a longer word is no longer caught (`crypto` does not catch `cryptocurrency`, which is why the rollout adds it).
+- **Deliberately not default keywords** — `web design`, `website design`, `outreach`, `outsourcing`, `proxies`: each blocks real enquiries on some client sites (agencies, charities, accountants, estate lawyers). Add them per site.
 - **Contact-form CAPTCHA is off by default and switched off on upgrade** — the honeypot and keyword filter stop most form spam; CAPTCHA on forms is opt-in per site.
 
 ## Release flow

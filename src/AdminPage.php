@@ -26,27 +26,6 @@ class AdminPage {
 	private $logger;
 
 	/**
-	 * Default blocked keywords (used to populate the textarea on first load).
-	 *
-	 * @var array
-	 */
-	private $default_keywords = array(
-		'seo',
-		'marketing',
-		'bitcoin',
-		'crypto',
-		'casino',
-		'viagra',
-		'forex',
-		'backlinks',
-		'link building',
-		'guest post',
-		'cbd',
-		'diet pills',
-		'weight loss',
-	);
-
-	/**
 	 * @var CaptchaProvider|null
 	 */
 	private $captcha;
@@ -113,7 +92,8 @@ class AdminPage {
 				'sanitize_callback' => array( $this, 'sanitize_settings' ),
 				'default'           => array(
 					'honeypot_enabled' => true,
-					'blocked_keywords' => $this->default_keywords,
+					'blocked_keywords' => SpamFilter::DEFAULT_KEYWORDS,
+					'blocked_scripts'  => array_keys( SpamFilter::SCRIPTS ),
 				),
 			)
 		);
@@ -137,6 +117,14 @@ class AdminPage {
 			'blocked_keywords',
 			'Blocked Keywords',
 			array( $this, 'render_keywords_field' ),
+			'bc-security',
+			'bc_security_spam_section'
+		);
+
+		add_settings_field(
+			'blocked_scripts',
+			'Blocked Languages',
+			array( $this, 'render_blocked_scripts_field' ),
 			'bc-security',
 			'bc_security_spam_section'
 		);
@@ -304,6 +292,21 @@ class AdminPage {
 
 		$sanitized['blocked_keywords'] = $keywords;
 
+		// Unticking every language posts no blocked_scripts at all, exactly like a
+		// form opened before this field existed. The hidden blocked_scripts_shown
+		// tells them apart: without it, keep what is stored rather than switching
+		// the language block off.
+		if ( isset( $input['blocked_scripts'] ) && is_array( $input['blocked_scripts'] ) ) {
+			$scripts = $input['blocked_scripts'];
+		} elseif ( ! empty( $input['blocked_scripts_shown'] ) ) {
+			$scripts = array();
+		} else {
+			$stored  = get_option( 'bc_security_settings', array() );
+			$scripts = isset( $stored['blocked_scripts'] ) && is_array( $stored['blocked_scripts'] ) ? $stored['blocked_scripts'] : array_keys( SpamFilter::SCRIPTS );
+		}
+
+		$sanitized['blocked_scripts'] = array_values( array_intersect( array_keys( SpamFilter::SCRIPTS ), array_filter( $scripts, 'is_string' ) ) );
+
 		// A form without the revision marker was opened before this version was
 		// installed and knows nothing of the new CAPTCHA fields: keep what is stored
 		// rather than blanking it. captcha_forms_mode is also accepted as a marker,
@@ -366,10 +369,10 @@ class AdminPage {
 	public function render_honeypot_field(): void {
 		$settings = get_option( 'bc_security_settings', array(
 			'honeypot_enabled' => true,
-			'blocked_keywords' => $this->default_keywords,
+			'blocked_keywords' => SpamFilter::DEFAULT_KEYWORDS,
 		) );
 
-		$checked = ! empty( $settings['honeypot_enabled'] ) ? 'checked' : '';
+		$checked =! empty( $settings['honeypot_enabled'] ) ? 'checked' : '';
 		?>
 		<label>
 			<input type="checkbox" name="bc_security_settings[honeypot_enabled]" value="1" <?php echo $checked; ?> />
@@ -385,14 +388,34 @@ class AdminPage {
 	public function render_keywords_field(): void {
 		$settings = get_option( 'bc_security_settings', array(
 			'honeypot_enabled' => true,
-			'blocked_keywords' => $this->default_keywords,
+			'blocked_keywords' => SpamFilter::DEFAULT_KEYWORDS,
 		) );
 
-		$keywords = isset( $settings['blocked_keywords'] ) ? $settings['blocked_keywords'] : $this->default_keywords;
+		$keywords = isset( $settings['blocked_keywords'] ) ? $settings['blocked_keywords'] : SpamFilter::DEFAULT_KEYWORDS;
 		$value    = implode( "\n", $keywords );
 		?>
 		<textarea name="bc_security_settings[blocked_keywords]" rows="10" cols="40" class="large-text"><?php echo esc_textarea( $value ); ?></textarea>
-		<p class="description">One keyword or phrase per line. Submissions containing any of these words (case-insensitive) will be blocked.</p>
+		<p class="description">One keyword or phrase per line. Submissions containing any of these as a whole word or phrase will be blocked. Capital letters and plurals make no difference: "ai agent" also blocks "AI Agents", but "ico" does not block "Nicole".</p>
+		<?php
+	}
+
+	/**
+	 * Render the blocked languages tick boxes.
+	 */
+	public function render_blocked_scripts_field(): void {
+		$settings = get_option( 'bc_security_settings', array() );
+		$blocked  = isset( $settings['blocked_scripts'] ) && is_array( $settings['blocked_scripts'] ) ? $settings['blocked_scripts'] : array_keys( SpamFilter::SCRIPTS );
+		?>
+		<input type="hidden" name="bc_security_settings[blocked_scripts_shown]" value="1" />
+		<fieldset>
+			<?php foreach ( SpamFilter::SCRIPTS as $slug => $script ) : ?>
+				<label>
+					<input type="checkbox" name="bc_security_settings[blocked_scripts][]" value="<?php echo esc_attr( $slug ); ?>" <?php checked( in_array( $slug, $blocked, true ) ); ?> />
+					<?php echo esc_html( $script['label'] ); ?>
+				</label><br />
+			<?php endforeach; ?>
+		</fieldset>
+		<p class="description">Blocks any submission that contains text in a ticked alphabet, even a single word. Untick one if this site has customers who write in that language. Blocked messages can still be read in the Logs tab.</p>
 		<?php
 	}
 
