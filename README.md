@@ -86,10 +86,13 @@ end up on a target list in the first place.
 
 ### Form Spam Protection
 
-Blocks spam submissions on contact forms with two layers of defense:
+Blocks spam submissions on contact forms with three layers of defense:
 
 - **Honeypot field** — invisible field injected via JavaScript; bots fill it, humans don't
-- **Keyword filter** — blocks submissions containing configurable spam keywords (SEO, bitcoin, casino, etc.)
+- **Blocked languages** — blocks submissions containing Russian/Ukrainian (Cyrillic), Chinese or Arabic text. All three are on by default; untick one under Settings on a site whose customers write in that language. Even a single word in a ticked alphabet blocks the submission
+- **Keyword filter** — blocks submissions containing configurable spam keywords (SEO, bitcoin, casino, etc.). Keywords match as whole words, so "ico" does not block "Nicole"; capitals and plurals make no difference
+
+Blocked submissions are kept in the Logs tab with the reason (`honeypot`, `language:cyrillic`, `keyword:seo`, …), so a wrongly blocked enquiry can still be read.
 
 **Supported form plugins:**
 
@@ -101,7 +104,7 @@ Blocks spam submissions on contact forms with two layers of defense:
 | Formidable Forms | Supported |
 
 **Admin page** (Settings > BlueCrocus Security):
-- **Settings tab** — toggle honeypot on/off, manage blocked keywords list, CAPTCHA, password reset
+- **Settings tab** — toggle honeypot on/off, manage blocked keywords list, blocked languages, CAPTCHA, password reset
 - **Logs tab** — view all form submissions with status (sent/blocked), filter by status, search by IP
 
 ### CAPTCHA (Optional)
@@ -262,7 +265,8 @@ bc-security/
 │   ├── ElementorCaptcha.php    # Detects Elementor forms with their own reCAPTCHA
 │   ├── Database.php            # Table migration (bc_form_logs)
 │   ├── FormLogger.php          # Form submission logger
-│   ├── SpamFilter.php          # Honeypot + keyword spam filter
+│   ├── SpamFilter.php          # Honeypot + language + keyword spam filter
+│   ├── KeywordMigration.php    # One-time addition of new default keywords
 │   ├── AdminPage.php           # Settings + Logs admin page, CAPTCHA notices
 │   └── LogsTable.php           # WP_List_Table for log display
 ├── .config/                    # Release scripts

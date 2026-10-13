@@ -1,9 +1,10 @@
 <?php
 /**
- * Spam filter — honeypot and keyword-based spam blocking for contact forms.
+ * Spam filter — honeypot, language and keyword-based spam blocking for contact forms.
  *
  * Hooks into Elementor Pro, Contact Form 7, Gravity Forms, and Formidable Forms
- * to inject a honeypot field and check submissions against a blocked keywords list.
+ * to inject a honeypot field and check submissions against the blocked alphabets
+ * and the blocked keywords list.
  *
  * @package BcSecurity
  */
@@ -33,11 +34,32 @@ class SpamFilter {
 	private $elementor;
 
 	/**
-	 * Default blocked keywords used when settings have not been saved yet.
-	 *
-	 * @var array
+	 * Alphabets a submission can be blocked for, keyed by the slug stored in
+	 * blocked_scripts. The only copy: the settings page builds its tick boxes from it.
 	 */
-	private $default_keywords = array(
+	public const SCRIPTS = array(
+		'cyrillic' => array(
+			'label'   => 'Russian / Ukrainian (Cyrillic)',
+			'pattern' => '/\p{Cyrillic}/u',
+		),
+		'han'      => array(
+			'label'   => 'Chinese characters (also used in Japanese)',
+			'pattern' => '/\p{Han}/u',
+		),
+		'arabic'   => array(
+			'label'   => 'Arabic (also Persian and Urdu)',
+			'pattern' => '/\p{Arabic}/u',
+		),
+	);
+
+	/**
+	 * Default blocked keywords used when settings have not been saved yet. The only
+	 * copy: the settings page shows this same list, so saving it changes nothing.
+	 *
+	 * A keyword added here must also go in KeywordMigration::ADDED, or it never
+	 * reaches a site that already has a saved list.
+	 */
+	public const DEFAULT_KEYWORDS = array(
 		// SEO & Digital Marketing.
 		'seo',
 		'search engine optimization',
@@ -75,6 +97,9 @@ class SpamFilter {
 		'brand awareness',
 		'conversion rate optimization',
 		'cro agency',
+		'rank higher on google',
+		'could rank higher',
+		'directoryinspector.com',
 
 		// Crypto & Bitcoin.
 		'bitcoin',
@@ -103,6 +128,8 @@ class SpamFilter {
 		'decentralized finance',
 		'profit guaranteed',
 		'risk-free investment',
+		'trezor suite',
+		'trezor-suite-us.com',
 
 		// Sales & Cold Outreach.
 		'we noticed your website',
@@ -128,6 +155,14 @@ class SpamFilter {
 		'money back guarantee',
 		'satisfaction guaranteed',
 		'100% guaranteed',
+		'cold outreach',
+		'email outreach',
+		'outreach campaign',
+		'b2b data',
+		'freeb2bdata',
+		'companyscout',
+		'ultraleadgeneration.com',
+		'blastleadgeneration',
 
 		// Cheap Dev & Design.
 		'web design services',
@@ -147,6 +182,13 @@ class SpamFilter {
 		'offshore development',
 		'dedicated developer',
 		'hire developer',
+		'redesign your website',
+		'ai agent',
+		'dandyaisoftware.com',
+		'virtual assistant',
+		'toptalentvas.com',
+		'proxy service',
+		'zero downtime',
 
 		// Financial Scams & Investments.
 		'investment opportunity',
@@ -233,12 +275,13 @@ class SpamFilter {
 	/**
 	 * Get plugin settings with defaults.
 	 *
-	 * @return array Settings array with honeypot_enabled and blocked_keywords.
+	 * @return array Settings array with honeypot_enabled, blocked_keywords and blocked_scripts.
 	 */
 	private function get_settings(): array {
 		$defaults = array(
 			'honeypot_enabled' => true,
-			'blocked_keywords' => $this->default_keywords,
+			'blocked_keywords' => self::DEFAULT_KEYWORDS,
+			'blocked_scripts'  => array_keys( self::SCRIPTS ),
 		);
 
 		$settings = get_option( 'bc_security_settings', array() );
@@ -265,6 +308,9 @@ class SpamFilter {
 	/**
 	 * Check form field values against the blocked keywords list.
 	 *
+	 * Keywords match as whole words: found anywhere in the text, "ico" blocked
+	 * everyone called Nicole and "defi" every message saying "definitely".
+	 *
 	 * @param array $fields Associative array of field name => value pairs.
 	 * @return string|null The matched keyword, or null if no match.
 	 */
@@ -272,8 +318,17 @@ class SpamFilter {
 		$settings = $this->get_settings();
 		$keywords = $settings['blocked_keywords'];
 
-		if ( empty( $keywords ) ) {
+		if ( empty( $keywords ) || ! is_array( $keywords ) ) {
 			return null;
+		}
+
+		$patterns = array();
+
+		foreach ( $keywords as $keyword ) {
+			$keyword = is_string( $keyword ) ? trim( $keyword ) : '';
+			if ( '' !== $keyword ) {
+				$patterns[ $keyword ] = $this->keyword_pattern( $keyword );
+			}
 		}
 
 		foreach ( $fields as $value ) {
@@ -281,16 +336,70 @@ class SpamFilter {
 				continue;
 			}
 
-			$value_lower = strtolower( $value );
+			foreach ( $patterns as $keyword => $pattern ) {
+				$found = preg_match( $pattern, $value );
 
-			foreach ( $keywords as $keyword ) {
-				$keyword = trim( $keyword );
-				if ( empty( $keyword ) ) {
-					continue;
+				// Text PCRE cannot read (broken UTF-8) falls back to the plain
+				// search, so the filter never switches itself off.
+				if ( false === $found ) {
+					$found = false !== stripos( $value, (string) $keyword );
 				}
 
-				if ( strpos( $value_lower, strtolower( $keyword ) ) !== false ) {
-					return $keyword;
+				if ( $found ) {
+					return (string) $keyword;
+				}
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Build the whole-word pattern for one keyword.
+	 *
+	 * A word edge is required only on a side where the keyword itself starts or ends
+	 * with a letter or digit, so ".xyz" and "#1 on google" keep working. A plural
+	 * ending is allowed ("ai agent" catches "AI agents"), an apostrophe plus a letter
+	 * continues the word ("you won" must not catch "you won't"), and a space in the
+	 * keyword matches any run of whitespace.
+	 *
+	 * @param string $keyword Trimmed, non-empty keyword.
+	 * @return string PCRE pattern.
+	 */
+	private function keyword_pattern( string $keyword ): string {
+		$words = preg_split( '/\s+/', $keyword, -1, PREG_SPLIT_NO_EMPTY );
+		$body  = implode( '\s+', array_map( function ( $word ) {
+			return preg_quote( $word, '/' );
+		}, $words ) );
+
+		$left  = preg_match( '/^[\p{L}\p{N}]/u', $keyword ) ? '(?<![\p{L}\p{N}])' : '';
+		$right = preg_match( '/[\p{L}\p{N}]$/u', $keyword ) ? '(?:e?s)?(?![\p{L}\p{N}]|[\'’]\p{L})' : '';
+
+		return '/' . $left . $body . $right . '/iu';
+	}
+
+	/**
+	 * Check form field values for a blocked alphabet.
+	 *
+	 * Any single letter counts: foreign-language spam is caught whole, and so is the
+	 * trick of swapping in look-alike Cyrillic letters to slip past the keyword list.
+	 * Text PCRE cannot read is let through rather than blocking everyone.
+	 *
+	 * @param array $fields Associative array of field name => value pairs.
+	 * @return string|null Slug of the matched alphabet, or null if no match.
+	 */
+	private function check_scripts( array $fields ): ?string {
+		$settings = $this->get_settings();
+		$scripts  = is_array( $settings['blocked_scripts'] ) ? $settings['blocked_scripts'] : array();
+
+		foreach ( $fields as $value ) {
+			if ( ! is_string( $value ) ) {
+				continue;
+			}
+
+			foreach ( $scripts as $slug ) {
+				if ( is_string( $slug ) && isset( self::SCRIPTS[ $slug ] ) && 1 === preg_match( self::SCRIPTS[ $slug ]['pattern'], $value ) ) {
+					return $slug;
 				}
 			}
 		}
@@ -385,12 +494,34 @@ class SpamFilter {
 				continue;
 			}
 
-			if ( is_string( $value ) ) {
-				$fields[ $key ] = sanitize_text_field( $value );
-			}
+			$this->collect_text( (string) $key, wp_unslash( $value ), $fields );
 		}
 
 		return $fields;
+	}
+
+	/**
+	 * Add a POST value to the field list, walking into nested values.
+	 *
+	 * Formidable posts every answer as item_meta[ID], and checkbox groups arrive as
+	 * arrays in every plugin; read top-level only, those were never checked.
+	 *
+	 * @param string $key    Field name; nested keys are joined with a dot.
+	 * @param mixed  $value  Unslashed POST value.
+	 * @param array  $fields Collected fields, by reference.
+	 * @param int    $depth  Current nesting depth.
+	 */
+	private function collect_text( string $key, $value, array &$fields, int $depth = 0 ): void {
+		if ( is_string( $value ) ) {
+			$fields[ $key ] = sanitize_text_field( $value );
+			return;
+		}
+
+		if ( is_array( $value ) && $depth < 5 ) {
+			foreach ( $value as $sub_key => $sub_value ) {
+				$this->collect_text( $key . '.' . $sub_key, $sub_value, $fields, $depth + 1 );
+			}
+		}
 	}
 
 	/* =====================================================================
@@ -474,6 +605,22 @@ class SpamFilter {
 			return;
 		}
 
+		// Language check.
+		$matched_script = $this->check_scripts( $fields );
+		if ( $matched_script !== null ) {
+			$this->logger->log( array(
+				'ip'           => $this->ip_resolver->get_client_ip(),
+				'status'       => 'blocked',
+				'block_reason' => 'language:' . $matched_script,
+				'form_plugin'  => 'elementor',
+				'page_url'     => $this->get_page_url(),
+				'form_data'    => $fields,
+			) );
+			$handler->add_error_message( 'Your submission could not be processed.' );
+			$handler->add_error( 'bc_spam', 'Your submission could not be processed.' );
+			return;
+		}
+
 		// Keyword check.
 		$matched_keyword = $this->check_keywords( $fields );
 		if ( $matched_keyword !== null ) {
@@ -547,6 +694,20 @@ class SpamFilter {
 				'ip'           => $this->ip_resolver->get_client_ip(),
 				'status'       => 'blocked',
 				'block_reason' => 'honeypot',
+				'form_plugin'  => 'cf7',
+				'page_url'     => $this->get_page_url(),
+				'form_data'    => $fields,
+			) );
+			return true;
+		}
+
+		// Language check.
+		$matched_script = $this->check_scripts( $fields );
+		if ( $matched_script !== null ) {
+			$this->logger->log( array(
+				'ip'           => $this->ip_resolver->get_client_ip(),
+				'status'       => 'blocked',
+				'block_reason' => 'language:' . $matched_script,
 				'form_plugin'  => 'cf7',
 				'page_url'     => $this->get_page_url(),
 				'form_data'    => $fields,
@@ -643,6 +804,26 @@ class SpamFilter {
 			return $validation_result;
 		}
 
+		// Language check.
+		$matched_script = $this->check_scripts( $fields );
+		if ( $matched_script !== null ) {
+			$this->logger->log( array(
+				'ip'           => $this->ip_resolver->get_client_ip(),
+				'status'       => 'blocked',
+				'block_reason' => 'language:' . $matched_script,
+				'form_plugin'  => 'gravity',
+				'page_url'     => $this->get_page_url(),
+				'form_data'    => $fields,
+			) );
+			$validation_result['is_valid'] = false;
+			foreach ( $validation_result['form']['fields'] as &$field ) {
+				$field->failed_validation  = true;
+				$field->validation_message = 'Your submission could not be processed.';
+				break;
+			}
+			return $validation_result;
+		}
+
 		// Keyword check.
 		$matched_keyword = $this->check_keywords( $fields );
 		if ( $matched_keyword !== null ) {
@@ -718,6 +899,21 @@ class SpamFilter {
 				'ip'           => $this->ip_resolver->get_client_ip(),
 				'status'       => 'blocked',
 				'block_reason' => 'honeypot',
+				'form_plugin'  => 'formidable',
+				'page_url'     => $this->get_page_url(),
+				'form_data'    => $fields,
+			) );
+			$errors['bc_spam'] = 'Your submission could not be processed.';
+			return $errors;
+		}
+
+		// Language check.
+		$matched_script = $this->check_scripts( $fields );
+		if ( $matched_script !== null ) {
+			$this->logger->log( array(
+				'ip'           => $this->ip_resolver->get_client_ip(),
+				'status'       => 'blocked',
+				'block_reason' => 'language:' . $matched_script,
 				'form_plugin'  => 'formidable',
 				'page_url'     => $this->get_page_url(),
 				'form_data'    => $fields,
